@@ -18,6 +18,7 @@ certs/
 *.sqlite3
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 *.crt
