@@ -1,0 +1,33 @@
+# dependencies / build artifacts
+node_modules/
+frontend/dist/
+backend/static/
+__pycache__/
+*.pyc
+
+# virtualenvs
+.venv/
+venv/
+
+# runtime data & secrets — NEVER commit these
+/data/
+data/
+certs/
+*.db
+*.sqlite*
+*.sqlite3
+.env
+.env.*
+*.pem
+*.key
+*.crt
+.secret_key
+.admin_password
+
+# editor / OS
+.DS_Store
+*.swp
+*.log
+
+# stale design snapshots (pre-redesign)
+design-shots/

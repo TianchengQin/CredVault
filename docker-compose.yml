@@ -1,0 +1,16 @@
+services:
+  credvault:
+    build: .
+    container_name: credvault
+    restart: unless-stopped
+    ports:
+      - "8904:8443"
+    environment:
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      # If unset, the entrypoint generates a random admin password and prints it once.
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - SECRET_KEY=${SECRET_KEY:-}
+      - DATABASE_URL=sqlite:////data/credvault.db
+    volumes:
+      - ./data:/data
+      - ./certs:/certs

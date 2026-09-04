@@ -1,0 +1,207 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Apple light palette */
+    --surface-950: 245 245 247; /* parchment - page canvas */
+    --surface-900: 255 255 255; /* white - cards */
+    --surface-850: 240 240 240;
+    --surface-800: 250 250 252; /* pearl - tiles / skeletons */
+
+    --zinc-100: 29 29 31;
+    --zinc-200: 29 29 31;
+    --zinc-300: 58 58 60;
+    --zinc-400: 110 110 115;
+    --zinc-500: 110 110 115;
+    --zinc-600: 134 134 139;
+    --zinc-700: 210 210 215;
+    --zinc-800: 229 229 231; /* hairline */
+    --zinc-900: 240 240 240;
+    --zinc-950: 245 245 247;
+
+    --emerald-50: 234 244 255;
+    --emerald-100: 232 241 251;
+    --emerald-200: 107 183 255;
+    --emerald-300: 41 151 255;
+    --emerald-400: 0 113 227;
+    --emerald-500: 0 102 204;
+    --emerald-600: 0 102 204;
+    --emerald-700: 0 74 153;
+    --emerald-800: 0 58 119;
+    --emerald-900: 240 247 255;
+    --emerald-950: 245 250 255;
+
+    --rose-50: 255 240 240;
+    --rose-100: 255 214 214;
+    --rose-300: 255 105 97;
+    --rose-400: 255 69 58;
+    --rose-500: 255 59 48;
+    --rose-600: 215 0 21;
+    --rose-700: 179 0 19;
+    --rose-800: 138 0 16;
+    --rose-900: 255 240 240;
+    --rose-950: 255 245 245;
+
+    --amber-100: 255 244 229;
+    --amber-200: 255 214 10;
+    --amber-300: 255 204 0;
+    --amber-400: 255 159 10;
+    --amber-500: 240 160 32;
+  }
+
+  .dark {
+    color-scheme: dark;
+    /* Apple dark palette (near-black surfaces, light text, system blue) */
+    --surface-950: 28 28 30; /* page canvas */
+    --surface-900: 44 44 46; /* cards */
+    --surface-850: 38 38 40;
+    --surface-800: 58 58 60; /* tiles / skeletons */
+
+    --zinc-100: 255 255 255;
+    --zinc-200: 245 245 247;
+    --zinc-300: 209 209 214;
+    --zinc-400: 134 134 139;
+    --zinc-500: 152 152 157;
+    --zinc-600: 174 174 178;
+    --zinc-700: 72 72 74;
+    --zinc-800: 58 58 60; /* hairline */
+    --zinc-900: 44 44 46;
+    --zinc-950: 28 28 30;
+
+    --emerald-50: 11 22 34;
+    --emerald-100: 16 32 47;
+    --emerald-200: 154 200 255;
+    --emerald-300: 107 183 255;
+    --emerald-400: 41 151 255;
+    --emerald-500: 10 132 255; /* systemBlue */
+    --emerald-600: 41 151 255;
+    --emerald-700: 10 132 255;
+    --emerald-800: 0 95 204;
+    --emerald-900: 13 33 51;
+    --emerald-950: 13 33 51;
+
+    --rose-50: 42 13 13;
+    --rose-100: 59 17 17;
+    --rose-300: 255 105 97;
+    --rose-400: 255 69 58;
+    --rose-500: 255 59 48;
+    --rose-600: 255 69 58;
+    --rose-700: 255 69 58;
+    --rose-800: 255 69 58;
+    --rose-900: 42 13 13;
+    --rose-950: 42 13 13;
+
+    --amber-100: 43 32 5;
+    --amber-200: 255 214 10;
+    --amber-300: 255 204 0;
+    --amber-400: 255 159 10;
+    --amber-500: 240 160 32;
+  }
+
+  html {
+    color-scheme: light;
+  }
+  body {
+    @apply bg-surface-950 text-zinc-200 antialiased;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2 {
+    letter-spacing: -0.022em;
+  }
+  ::selection {
+    @apply bg-emerald-500/20 text-zinc-200;
+  }
+  :focus-visible {
+    @apply outline-none ring-2 ring-emerald-400 ring-offset-2 ring-offset-surface-950;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #c7c7cc;
+    border-radius: 6px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #aeaeb2;
+    background-clip: padding-box;
+  }
+}
+
+@layer utilities {
+  .input {
+    @apply w-full rounded-full bg-surface-900 border border-zinc-800 px-4 py-2.5 text-[15px] text-zinc-200 placeholder-zinc-400 transition-colors;
+  }
+  .input:focus {
+    @apply border-emerald-500;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-full bg-emerald-500 px-4 py-2 text-[15px] font-normal text-white transition active:scale-[0.95] disabled:opacity-50 disabled:pointer-events-none hover:bg-emerald-400;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-3 py-2 text-[15px] text-emerald-500 transition hover:bg-surface-800 active:scale-[0.95];
+  }
+  .icon-btn {
+    @apply p-1.5 rounded-full text-zinc-400 transition hover:text-zinc-200 hover:bg-surface-800 active:scale-[0.95];
+  }
+  .label {
+    @apply block text-[13px] font-normal text-zinc-500 mb-1.5;
+  }
+  .card {
+    @apply rounded-[18px] border border-zinc-800 bg-surface-900;
+  }
+  .modal-backdrop {
+    @apply fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm;
+  }
+  .mono-val {
+    @apply font-mono text-[13px];
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.animate-rise {
+  animation: rise 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.skeleton {
+  @apply relative overflow-hidden rounded-lg bg-surface-800;
+}
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.04), transparent);
+  animation: shimmer 1.4s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise,
+  .skeleton::after {
+    animation: none;
+  }
+}
