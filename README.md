@@ -39,6 +39,9 @@ with AI agents.
 | ⏱️ **Auto-lock** | The vault locks itself after inactivity. Security naps included. |
 | 🔑 **Password generator** | Strong, crypto-random passwords at the click of a button. |
 | 🗂️ **Organize** | Categories, favorites, search & filters so nothing gets lost. |
+| 🔗 **Share credentials** | Share a credential with another user with `read` or `write` access. Copies are re-encrypted with the recipient's vault key. |
+| ✍️ **Self-registration** | Users can create their own account right from the sign-in page. |
+| 🔑 **Password reset** | An admin can reset a user to a temporary password; the user then sets a new one (with MFA) on next sign-in. |
 | 💾 **Backup / restore** | Export to JSON, import to restore or merge. Peace of mind. |
 | 🤖 **AI-agent friendly** | API tokens (`read`/`write`) + an MCP server so agents can work for you. |
 | 🎨 **Apple-tasteful UI** | Parchment-clean surfaces, Action Blue accent, dark mode. Easy on the eyes. |
@@ -115,10 +118,12 @@ Tools: `list_credentials`, `get_credential`, `create_credential`, `update_creden
 ## 🔒 Security model
 
 - **Per-user vaults.** Each vault key is derived (Argon2id) from that user's master password. Credentials are AES-256-GCM encrypted; admins manage accounts but can't decrypt your vault.
+- **Shared credentials stay encrypted for the recipient.** Sharing re-encrypts a copy with the recipient's vault key, so only they can decrypt it. The recipient must have unlocked their vault recently for the share to be created; edits to a shared copy are independent (a snapshot).
 - **No secrets at rest in the repo.** The database, TLS keys, and generated secrets live under `data/` and `certs/` — both git-ignored.
 - **Brute-force armor:** 5 failed login/unlock attempts → 15-minute lockout.
 - **Optional TOTP 2FA** enforced at sign-in when enabled.
 - **Auto-lock** after inactivity (client + server-side TTL).
+- **Login password ≠ vault master password.** An admin can reset a user's *login* password to a temporary one (the user is forced to set a new one, with MFA, on next sign-in) without touching the vault. The vault is separate.
 - **Lost your master password?** Your vault is unrecoverable by design. An admin can **reset** a vault so the user starts fresh (this wipes that vault's credentials).
 
 > 📖 Full API & token management details live in the app and its OpenAPI docs at `/docs`.

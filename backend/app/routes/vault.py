@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import schemas, auth, crypto
 from .. import audit
-from ..models import User, Credential
+from ..models import User, Credential, SharedCredential
 from ..deps import get_vault_context, require_write, VaultContext
 from ..security import unlock_limiter
 
@@ -43,7 +43,7 @@ def vault_setup(
     user.vault_ciphertext = ct
     user.vault_nonce = nonce
     db.commit()
-    token = auth.vault_store.put(key)
+    token = auth.vault_store.put(key, user.id)
     audit.log(db, user_id=user.id, username=user.username, action="vault_setup", ip=audit.client_ip(request))
     return schemas.VaultUnlockResponse(vault_token=token, setup_required=False)
 
@@ -70,7 +70,7 @@ def vault_unlock(
         audit.log(db, user_id=user.id, username=user.username, action="vault_unlock_failed", ip=audit.client_ip(request))
         raise HTTPException(status_code=401, detail="Wrong master password")
     unlock_limiter.reset(key)
-    token = auth.vault_store.put(candidate)
+    token = auth.vault_store.put(candidate, user.id)
     audit.log(db, user_id=user.id, username=user.username, action="vault_unlocked", ip=audit.client_ip(request))
     return schemas.VaultUnlockResponse(vault_token=token, setup_required=False)
 
@@ -177,6 +177,265 @@ def delete_credential(
     cred = _get_own_credential(cred_id, ctx, db)
     audit.log(db, user_id=ctx.user.id, username=ctx.user.username, action="credential_delete", detail=cred.name, ip=audit.client_ip(request))
     db.delete(cred)
+    db.commit()
+    return {"ok": True}
+
+
+# ---------------- Sharing credentials with other users ----------------
+
+
+@router.get("/shareable-users", response_model=list[schemas.ShareableUser])
+def shareable_users(ctx: VaultContext = Depends(get_vault_context), db: Session = Depends(get_db)):
+    """Users the current user can share a credential with (everyone but themself)."""
+    users = db.query(User).filter(User.id != ctx.user.id).order_by(User.username).all()
+    return [schemas.ShareableUser(id=u.id, username=u.username) for u in users]
+
+
+def _shared_to_out(share: SharedCredential, key: bytes, owner: str = "") -> schemas.SharedCredentialFull:
+    p = crypto.decrypt_json(share.encrypted_payload, share.nonce, key)
+    return schemas.SharedCredentialFull(
+        share_id=share.id, id=share.source_credential_id or share.id,
+        name=share.name, secret=p.get("secret", ""),
+        url=p.get("url", ""), username=p.get("username", ""),
+        description=p.get("description", ""),
+        category=share.category or "", favorite=bool(share.favorite),
+        permission=share.permission, owner=owner,
+    )
+
+
+@router.get("/credentials/{cred_id}/shares", response_model=list[schemas.ShareInDetail])
+def list_credential_shares(
+    cred_id: int,
+    ctx: VaultContext = Depends(get_vault_context),
+    db: Session = Depends(get_db),
+):
+    """Owner view: who a credential is shared with."""
+    _get_own_credential(cred_id, ctx, db)
+    shares = db.query(SharedCredential).filter(SharedCredential.source_credential_id == cred_id).all()
+    recipients = {u.id: u.username for u in db.query(User).all()}
+    return [
+        schemas.ShareInDetail(
+            id=s.id, name=s.name, permission=s.permission,
+            recipient=recipients.get(s.recipient_user_id, ""),
+            category=s.category or "", favorite=bool(s.favorite),
+            created_at=s.created_at.isoformat() if s.created_at else "",
+            source_credential_id=s.source_credential_id,
+        )
+        for s in shares
+    ]
+
+
+@router.post("/credentials/{cred_id}/share", response_model=schemas.ShareInDetail, status_code=201)
+def share_credential(
+    cred_id: int,
+    body: schemas.ShareRequest,
+    ctx: VaultContext = Depends(get_vault_context),
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
+    """Share a credential to another user with read/write permission.
+
+    A decrypted copy is re-encrypted with the recipient's vault key, so only
+    the recipient can decrypt it. The recipient must have unlocked their vault
+    recently so their key is available in memory.
+    """
+    require_write(ctx)
+    cred = _get_own_credential(cred_id, ctx, db)
+    recipient = db.query(User).filter(User.username == body.username).first()
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    if recipient.id == ctx.user.id:
+        raise HTTPException(status_code=400, detail="Cannot share a credential with yourself")
+    if recipient.vault_salt is None:
+        raise HTTPException(status_code=400, detail="Recipient has not set up their vault yet")
+    recipient_key = auth.vault_store.get_key_for_user(recipient.id)
+    if recipient_key is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Recipient must unlock their vault first so the shared copy can be encrypted for them.",
+        )
+
+    payload = crypto.decrypt_json(cred.encrypted_payload, cred.nonce, ctx.key)
+    ct, nonce = crypto.encrypt_json(payload, recipient_key)
+
+    existing = db.query(SharedCredential).filter(
+        SharedCredential.source_credential_id == cred.id,
+        SharedCredential.recipient_user_id == recipient.id,
+    ).first()
+    if existing:
+        existing.permission = body.permission
+        existing.name = cred.name
+        existing.encrypted_payload = ct
+        existing.nonce = nonce
+        existing.category = cred.category or ""
+        existing.favorite = 1 if cred.favorite else 0
+        db.commit()
+        db.refresh(existing)
+        audit.log(db, user_id=ctx.user.id, username=ctx.user.username, action="credential_share_updated", detail=f"{cred.name} -> {recipient.username} ({body.permission})", ip=audit.client_ip(request))
+        return schemas.ShareInDetail(
+            id=existing.id, name=existing.name, permission=existing.permission,
+            recipient=recipient.username, category=existing.category or "",
+            favorite=bool(existing.favorite),
+            created_at=existing.created_at.isoformat() if existing.created_at else "",
+            source_credential_id=existing.source_credential_id,
+        )
+
+    share = SharedCredential(
+        owner_user_id=ctx.user.id, recipient_user_id=recipient.id,
+        source_credential_id=cred.id, permission=body.permission,
+        name=cred.name, encrypted_payload=ct, nonce=nonce,
+        category=cred.category or "", favorite=1 if cred.favorite else 0,
+    )
+    db.add(share)
+    db.commit()
+    db.refresh(share)
+    audit.log(db, user_id=ctx.user.id, username=ctx.user.username, action="credential_share", detail=f"{cred.name} -> {recipient.username} ({body.permission})", ip=audit.client_ip(request))
+    return schemas.ShareInDetail(
+        id=share.id, name=share.name, permission=share.permission,
+        recipient=recipient.username, category=share.category or "",
+        favorite=bool(share.favorite),
+        created_at=share.created_at.isoformat() if share.created_at else "",
+        source_credential_id=share.source_credential_id,
+    )
+
+
+@router.patch("/credentials/{cred_id}/shares/{share_id}", response_model=schemas.ShareInDetail)
+def update_share_permission(
+    cred_id: int,
+    share_id: int,
+    body: schemas.SharePermissionUpdate,
+    ctx: VaultContext = Depends(get_vault_context),
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
+    require_write(ctx)
+    _get_own_credential(cred_id, ctx, db)
+    share = db.query(SharedCredential).filter(
+        SharedCredential.id == share_id,
+        SharedCredential.owner_user_id == ctx.user.id,
+        SharedCredential.source_credential_id == cred_id,
+    ).first()
+    if not share:
+        raise HTTPException(status_code=404, detail="Share not found")
+    share.permission = body.permission
+    db.commit()
+    db.refresh(share)
+    recipient = db.query(User).filter(User.id == share.recipient_user_id).first()
+    audit.log(db, user_id=ctx.user.id, username=ctx.user.username, action="credential_share_permission", detail=f"{share.name} -> {recipient.username if recipient else ''} ({body.permission})", ip=audit.client_ip(request))
+    return schemas.ShareInDetail(
+        id=share.id, name=share.name, permission=share.permission,
+        recipient=recipient.username if recipient else "", category=share.category or "",
+        favorite=bool(share.favorite),
+        created_at=share.created_at.isoformat() if share.created_at else "",
+        source_credential_id=share.source_credential_id,
+    )
+
+
+@router.delete("/credentials/{cred_id}/shares/{share_id}")
+def unshare_credential(
+    cred_id: int,
+    share_id: int,
+    ctx: VaultContext = Depends(get_vault_context),
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
+    require_write(ctx)
+    _get_own_credential(cred_id, ctx, db)
+    share = db.query(SharedCredential).filter(
+        SharedCredential.id == share_id,
+        SharedCredential.owner_user_id == ctx.user.id,
+        SharedCredential.source_credential_id == cred_id,
+    ).first()
+    if not share:
+        raise HTTPException(status_code=404, detail="Share not found")
+    recipient = db.query(User).filter(User.id == share.recipient_user_id).first()
+    audit.log(db, user_id=ctx.user.id, username=ctx.user.username, action="credential_unshare", detail=f"{share.name} <- {recipient.username if recipient else ''}", ip=audit.client_ip(request))
+    db.delete(share)
+    db.commit()
+    return {"ok": True}
+
+
+# ---------------- Recipient view of shared credentials ----------------
+
+
+@router.get("/shared", response_model=list[schemas.SharedCredentialFull])
+def list_shared_with_me(ctx: VaultContext = Depends(get_vault_context), db: Session = Depends(get_db)):
+    """Credentials shared to the current user by others."""
+    shares = db.query(SharedCredential).filter(SharedCredential.recipient_user_id == ctx.user.id).all()
+    owners = {u.id: u.username for u in db.query(User).all()}
+    out = []
+    for s in shares:
+        try:
+            out.append(_shared_to_out(s, ctx.key, owner=owners.get(s.owner_user_id, "")))
+        except Exception:
+            continue
+    return out
+
+
+@router.get("/shared/{share_id}", response_model=schemas.SharedCredentialFull)
+def get_shared_credential(
+    share_id: int,
+    ctx: VaultContext = Depends(get_vault_context),
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
+    share = db.query(SharedCredential).filter(
+        SharedCredential.id == share_id,
+        SharedCredential.recipient_user_id == ctx.user.id,
+    ).first()
+    if not share:
+        raise HTTPException(status_code=404, detail="Shared credential not found")
+    owner = db.query(User).filter(User.id == share.owner_user_id).first()
+    audit.log(db, user_id=ctx.user.id, username=ctx.user.username, action="shared_credential_read", detail=share.name, ip=audit.client_ip(request))
+    return _shared_to_out(share, ctx.key, owner=owner.username if owner else "")
+
+
+@router.put("/shared/{share_id}", response_model=schemas.SharedCredentialFull)
+def update_shared_credential(
+    share_id: int,
+    body: schemas.CredentialIn,
+    ctx: VaultContext = Depends(get_vault_context),
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
+    share = db.query(SharedCredential).filter(
+        SharedCredential.id == share_id,
+        SharedCredential.recipient_user_id == ctx.user.id,
+    ).first()
+    if not share:
+        raise HTTPException(status_code=404, detail="Shared credential not found")
+    require_write(ctx)
+    if share.permission != "write":
+        raise HTTPException(status_code=403, detail="This share is read-only")
+    ct, nonce = crypto.encrypt_json(_payload(body.secret, body.url, body.username, body.description), ctx.key)
+    share.name = body.name
+    share.encrypted_payload = ct
+    share.nonce = nonce
+    share.category = body.category or ""
+    share.favorite = 1 if body.favorite else 0
+    db.commit()
+    db.refresh(share)
+    owner = db.query(User).filter(User.id == share.owner_user_id).first()
+    audit.log(db, user_id=ctx.user.id, username=ctx.user.username, action="shared_credential_update", detail=share.name, ip=audit.client_ip(request))
+    return _shared_to_out(share, ctx.key, owner=owner.username if owner else "")
+
+
+@router.delete("/shared/{share_id}")
+def remove_shared_credential(
+    share_id: int,
+    ctx: VaultContext = Depends(get_vault_context),
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
+    """Recipient removes a shared credential from their vault."""
+    share = db.query(SharedCredential).filter(
+        SharedCredential.id == share_id,
+        SharedCredential.recipient_user_id == ctx.user.id,
+    ).first()
+    if not share:
+        raise HTTPException(status_code=404, detail="Shared credential not found")
+    audit.log(db, user_id=ctx.user.id, username=ctx.user.username, action="shared_credential_remove", detail=share.name, ip=audit.client_ip(request))
+    db.delete(share)
     db.commit()
     return {"ok": True}
 

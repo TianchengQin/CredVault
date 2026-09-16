@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from .. import schemas, auth, audit
+from .. import schemas, auth, audit, crypto
 from ..models import User, AuditLog
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -72,6 +72,22 @@ def reset_user_vault(user_id: int, user: User = Depends(auth.get_current_user), 
     db.commit()
     audit.log(db, user_id=user.id, username=user.username, action="vault_reset", detail=target.username, ip=audit.client_ip(request))
     return {"ok": True}
+
+
+@router.post("/{user_id}/reset-password")
+def reset_user_password(user_id: int, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db), request: Request = None):
+    _require_admin(user)
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.id == user.id:
+        raise HTTPException(status_code=400, detail="Cannot reset your own password here")
+    temp = crypto.generate_password(14)
+    target.login_hash = auth.hash_login_password(temp)
+    target.must_change_password = 1
+    db.commit()
+    audit.log(db, user_id=user.id, username=user.username, action="password_reset", detail=target.username, ip=audit.client_ip(request))
+    return {"ok": True, "username": target.username, "temp_password": temp}
 
 
 @router.get("/audit-log")

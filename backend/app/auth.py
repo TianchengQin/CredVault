@@ -79,12 +79,12 @@ def get_current_user(
 # Maps a vault token to the derived AES key. Keys live in memory only.
 class VaultKeyStore:
     def __init__(self, ttl_seconds: int = 1800):
-        self._keys: dict[str, tuple[bytes, float]] = {}
+        self._keys: dict[str, tuple[int | None, bytes, float]] = {}
         self.ttl_seconds = ttl_seconds
 
-    def put(self, key: bytes) -> str:
+    def put(self, key: bytes, user_id: int | None = None) -> str:
         token = secrets.token_urlsafe(32)
-        self._keys[token] = (key, datetime.now(timezone.utc).timestamp() + self.ttl_seconds)
+        self._keys[token] = (user_id, key, datetime.now(timezone.utc).timestamp() + self.ttl_seconds)
         return token
 
     def get(self, token: str | None) -> bytes:
@@ -93,11 +93,22 @@ class VaultKeyStore:
         entry = self._keys.get(token)
         if entry is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Vault not unlocked or expired")
-        key, expires = entry
+        _, key, expires = entry
         if datetime.now(timezone.utc).timestamp() > expires:
             self._keys.pop(token, None)
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Vault locked due to inactivity, unlock again")
         return key
+
+    def get_key_for_user(self, user_id: int) -> bytes | None:
+        """Return a currently-unlocked vault key for the given user, or None."""
+        now = datetime.now(timezone.utc).timestamp()
+        for token, (uid, key, expires) in list(self._keys.items()):
+            if uid == user_id:
+                if now > expires:
+                    self._keys.pop(token, None)
+                    continue
+                return key
+        return None
 
     def revoke(self, token: str | None) -> None:
         if token:

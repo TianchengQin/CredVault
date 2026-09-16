@@ -12,6 +12,14 @@ class LoginResponse(BaseModel):
     is_admin: bool = False
     mfa_required: bool = False
     mfa_token: str = ""
+    must_change_password: bool = False
+    mfa_enabled: bool = False
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8)
+    mfa_code: str = ""
 
 
 class MfaConfirmLoginRequest(BaseModel):
@@ -82,6 +90,41 @@ class ApiTokenOut(BaseModel):
 
 class ApiTokenCreated(ApiTokenOut):
     token: str
+
+
+class ShareRequest(BaseModel):
+    username: str = Field(..., min_length=1)
+    permission: str = Field(..., pattern="^(read|write)$")
+
+
+class SharePermissionUpdate(BaseModel):
+    permission: str = Field(..., pattern="^(read|write)$")
+
+
+class ShareOut(BaseModel):
+    id: int
+    name: str
+    permission: str
+    recipient: str = ""
+    owner: str = ""
+    category: str = ""
+    favorite: bool = False
+    created_at: str = ""
+
+
+class ShareInDetail(ShareOut):
+    source_credential_id: int | None = None
+
+
+class SharedCredentialFull(CredentialFull):
+    permission: str
+    owner: str = ""
+    share_id: int
+
+
+class ShareableUser(BaseModel):
+    id: int
+    username: str
 
 
 class AuditLogOut(BaseModel):

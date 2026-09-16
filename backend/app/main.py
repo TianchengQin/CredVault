@@ -37,6 +37,7 @@ def _migrate():
         "users": [
             ("totp_secret", "ALTER TABLE users ADD COLUMN totp_secret VARCHAR"),
             ("totp_enabled", "ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0"),
+            ("must_change_password", "ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0"),
         ],
         "credentials": [
             ("category", "ALTER TABLE credentials ADD COLUMN category VARCHAR DEFAULT ''"),

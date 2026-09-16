@@ -11,6 +11,8 @@ class User(Base):
     username = Column(String, unique=True, index=True, nullable=False)
     login_hash = Column(String, nullable=False)
     is_admin = Column(Integer, default=0)
+    # when set, the user must change their login password on next sign-in
+    must_change_password = Column(Integer, default=0)
     # optional 2FA (TOTP)
     totp_secret = Column(String, nullable=True)
     totp_enabled = Column(Integer, default=0)
@@ -57,6 +59,32 @@ class Credential(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     owner = relationship("User", back_populates="credentials")
+
+
+class SharedCredential(Base):
+    """A copy of a credential shared to another user.
+
+    The copy is encrypted with the *recipient's* vault key, so only the
+    recipient can decrypt it. Permission controls read/write access.
+    """
+    __tablename__ = "shared_credentials"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    recipient_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    # the owner's original credential this is a copy of (for reference/audit)
+    source_credential_id = Column(Integer, nullable=True)
+    permission = Column(String, nullable=False)  # "read" | "write"
+    name = Column(String, nullable=False)
+    encrypted_payload = Column(Text, nullable=False)
+    nonce = Column(String, nullable=False)
+    category = Column(String, default="", index=True)
+    favorite = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    owner = relationship("User", foreign_keys=[owner_user_id])
+    recipient = relationship("User", foreign_keys=[recipient_user_id])
 
 
 class AuditLog(Base):

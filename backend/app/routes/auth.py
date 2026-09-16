@@ -30,12 +30,45 @@ def login(body: schemas.LoginRequest, request: Request, db: Session = Depends(ge
     login_limiter.reset(key)
     audit.log(db, user_id=user.id, username=user.username, action="login", ip=audit.client_ip(request))
 
+    must_change = bool(user.must_change_password)
     if user.totp_enabled:
         mfa_token = auth.create_mfa_token(user.id)
-        return schemas.LoginResponse(token="", username=user.username, is_admin=bool(user.is_admin), mfa_required=True, mfa_token=mfa_token)
+        return schemas.LoginResponse(
+            token="", username=user.username, is_admin=bool(user.is_admin),
+            mfa_required=True, mfa_token=mfa_token,
+            must_change_password=must_change, mfa_enabled=True,
+        )
 
     token = auth.create_access_token(user.id)
-    return schemas.LoginResponse(token=token, username=user.username, is_admin=bool(user.is_admin))
+    return schemas.LoginResponse(
+        token=token, username=user.username, is_admin=bool(user.is_admin),
+        must_change_password=must_change, mfa_enabled=bool(user.totp_enabled),
+    )
+
+
+@router.post("/register", response_model=schemas.LoginResponse, status_code=201)
+def register(body: schemas.UserCreate, request: Request, db: Session = Depends(get_db)):
+    """Self-service account registration. Creates a normal (non-admin) user and signs them in."""
+    key = _login_key(request, body.username)
+    allowed, retry_after = login_limiter.check(key)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=f"Too many attempts. Try again in {retry_after}s.")
+
+    username = body.username.strip()
+    if not username or not body.password:
+        raise HTTPException(status_code=400, detail="Username and password are required")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if db.query(User).filter(User.username == username).first():
+        raise HTTPException(status_code=400, detail="Username already exists")
+
+    user = User(username=username, login_hash=auth.hash_login_password(body.password), is_admin=0)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    audit.log(db, user_id=user.id, username=user.username, action="user_register", ip=audit.client_ip(request))
+    token = auth.create_access_token(user.id)
+    return schemas.LoginResponse(token=token, username=user.username, is_admin=False)
 
 
 @router.post("/2fa/confirm", response_model=schemas.LoginResponse)
@@ -49,7 +82,10 @@ def confirm_mfa(body: schemas.MfaConfirmLoginRequest, request: Request, db: Sess
         raise HTTPException(status_code=401, detail="Invalid 2FA code")
     audit.log(db, user_id=user.id, username=user.username, action="login_mfa", ip=audit.client_ip(request))
     token = auth.create_access_token(user.id)
-    return schemas.LoginResponse(token=token, username=user.username, is_admin=bool(user.is_admin))
+    return schemas.LoginResponse(
+        token=token, username=user.username, is_admin=bool(user.is_admin),
+        must_change_password=bool(user.must_change_password), mfa_enabled=True,
+    )
 
 
 @router.get("/2fa/setup", response_model=schemas.MfaSetupResponse)
@@ -92,4 +128,34 @@ def mfa_status(user: User = Depends(auth.get_current_user)):
 
 @router.get("/me", response_model=schemas.LoginResponse)
 def me(user: User = Depends(auth.get_current_user)):
-    return schemas.LoginResponse(token="", username=user.username, is_admin=bool(user.is_admin))
+    return schemas.LoginResponse(
+        token="", username=user.username, is_admin=bool(user.is_admin),
+        must_change_password=bool(user.must_change_password),
+        mfa_enabled=bool(user.totp_enabled),
+    )
+
+
+@router.post("/change-password")
+def change_password(
+    body: schemas.ChangePasswordRequest,
+    user: User = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
+    """Change the current user's login password.
+
+    Re-verifies the current password and, when MFA is enabled, requires a
+    valid 2FA code. Clears the must-change-password flag.
+    """
+    if not auth.verify_login_password(body.current_password, user.login_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+    if user.totp_enabled:
+        if not user.totp_secret or not crypto.totp_verify(user.totp_secret, body.mfa_code):
+            raise HTTPException(status_code=400, detail="Invalid 2FA code")
+    user.login_hash = auth.hash_login_password(body.new_password)
+    user.must_change_password = 0
+    db.commit()
+    audit.log(db, user_id=user.id, username=user.username, action="password_change", ip=audit.client_ip(request))
+    return {"ok": True}

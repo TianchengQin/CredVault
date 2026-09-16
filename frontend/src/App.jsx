@@ -26,6 +26,7 @@ const icons = {
   moon: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>),
   refresh: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M23 4v6h-6" /><path d="M1 20v-6h6" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10" /><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>),
   users: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>),
+  share: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><line x1="8.59" x2="15.42" y1="13.51" y2="17.49" /><line x1="15.41" x2="8.59" y1="6.51" y2="10.49" /></svg>),
 }
 
 function Logo({ size = 38 }) {
@@ -148,8 +149,10 @@ function AuthForm({ title, subtitle, fields, submitLabel, onSubmit, loading, err
 }
 
 function LoginPage({ onLogin }) {
+  const [mode, setMode] = useState('login') // 'login' | 'register'
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
   const [code, setCode] = useState('')
   const [mfaToken, setMfaToken] = useState('')
   const [error, setError] = useState('')
@@ -158,6 +161,21 @@ function LoginPage({ onLogin }) {
   const submit = async (e) => {
     e.preventDefault()
     setError('')
+    if (mode === 'register') {
+      if (password.length < 8) { setError('Password must be at least 8 characters'); return }
+      if (password !== confirm) { setError('Passwords do not match'); return }
+      setLoading(true)
+      try {
+        const r = await api.post('/auth/register', { username, password })
+        setSession(r.data.token, '')
+        onLogin(r.data)
+      } catch (err) {
+        setError(err.response?.data?.detail || 'Registration failed')
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
     setLoading(true)
     try {
       const r = await api.post('/auth/login', { username, password })
@@ -212,25 +230,53 @@ function LoginPage({ onLogin }) {
           }
         />
       ) : (
-        <AuthForm
-          title="Sign in"
-          submitLabel="Sign in"
-          loading={loading}
-          error={error}
-          onSubmit={submit}
-          fields={
-            <>
-              <div>
-                <label className="label" htmlFor="u">Username</label>
-                <input id="u" className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus />
-              </div>
-              <div>
-                <label className="label" htmlFor="p">Password</label>
-                <input id="p" type="password" className="input" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
-              </div>
-            </>
-          }
-        />
+        <>
+          <AuthForm
+            title={mode === 'register' ? 'Create your account' : 'Sign in'}
+            subtitle={mode === 'register' ? 'Register to get your own encrypted vault. An admin creates accounts too.' : undefined}
+            submitLabel={mode === 'register' ? (loading ? 'Please wait' : 'Create account') : 'Sign in'}
+            loading={loading}
+            error={error}
+            onSubmit={submit}
+            fields={
+              mode === 'register' ? (
+                <>
+                  <div>
+                    <label className="label" htmlFor="ru">Username</label>
+                    <input id="ru" className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus />
+                  </div>
+                  <div>
+                    <label className="label" htmlFor="rp">Password</label>
+                    <input id="rp" type="password" className="input" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
+                    <p className="mt-1 text-xs text-zinc-500">At least 8 characters.</p>
+                  </div>
+                  <div>
+                    <label className="label" htmlFor="rc">Confirm password</label>
+                    <input id="rc" type="password" className="input" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className="label" htmlFor="u">Username</label>
+                    <input id="u" className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus />
+                  </div>
+                  <div>
+                    <label className="label" htmlFor="p">Password</label>
+                    <input id="p" type="password" className="input" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+                  </div>
+                </>
+              )
+            }
+          />
+          <p className="mt-4 text-center text-sm text-zinc-500">
+            {mode === 'register' ? (
+              <>Already have an account? <button onClick={() => { setMode('login'); setError(''); setConfirm('') }} className="text-emerald-400 hover:text-emerald-300 font-medium">Sign in</button></>
+            ) : (
+              <>New here? <button onClick={() => { setMode('register'); setError(''); setConfirm('') }} className="text-emerald-400 hover:text-emerald-300 font-medium">Create an account</button></>
+            )}
+          </p>
+        </>
       )}
     </AuthShell>
   )
@@ -326,6 +372,84 @@ function UnlockPage({ username, onUnlocked, onLogout }) {
   )
 }
 
+// ---------- Force password change after admin reset ----------
+function ChangePasswordPage({ username, mfaEnabled, onChanged, onLogout }) {
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [code, setCode] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const submit = async (e) => {
+    e.preventDefault()
+    setError('')
+    if (next.length < 8) { setError('New password must be at least 8 characters'); return }
+    if (next !== confirm) { setError('New passwords do not match'); return }
+    setLoading(true)
+    try {
+      await api.post('/auth/change-password', { current_password: current, new_password: next, mfa_code: code })
+      onChanged()
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to change password')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <AuthShell>
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-full bg-amber-500/15 text-amber-300 flex items-center justify-center">
+            <span className="w-3.5 h-3.5">{icons.key}</span>
+          </div>
+          <div>
+            <p className="text-sm font-medium text-zinc-100">{username}</p>
+            <p className="text-xs text-zinc-500">Password reset by an admin</p>
+          </div>
+        </div>
+        <button onClick={onLogout} className="text-sm text-zinc-400 hover:text-zinc-200 inline-flex items-center gap-1.5">
+          <span className="w-3.5 h-3.5">{icons.logout}</span>
+          Sign out
+        </button>
+      </div>
+      <AuthForm
+        title="Set a new password"
+        subtitle="An admin gave you a temporary password. Choose a permanent one now. It only unlocks your account - your vault master password is separate."
+        submitLabel={loading ? 'Please wait' : 'Set new password'}
+        loading={loading}
+        error={error}
+        onSubmit={submit}
+        fields={
+          <>
+            <div>
+              <label className="label" htmlFor="cp">Current (temporary) password</label>
+              <input id="cp" type="password" className="input" value={current} onChange={(e) => setCurrent(e.target.value)} autoComplete="current-password" autoFocus />
+            </div>
+            <div>
+              <label className="label" htmlFor="np">New password</label>
+              <input id="np" type="password" className="input" value={next} onChange={(e) => setNext(e.target.value)} autoComplete="new-password" />
+              <p className="mt-1 text-xs text-zinc-500">At least 8 characters.</p>
+            </div>
+            <div>
+              <label className="label" htmlFor="np2">Confirm new password</label>
+              <input id="np2" type="password" className="input" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
+            </div>
+            {mfaEnabled && (
+              <div>
+                <label className="label" htmlFor="mp">Authenticator code</label>
+                <input id="mp" className="input mono-val !text-lg tracking-[0.4em] text-center" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))} placeholder="000000" />
+                <p className="mt-1 text-xs text-zinc-500">Required to verify it's you.</p>
+              </div>
+            )}
+          </>
+        }
+      />
+    </AuthShell>
+  )
+}
+
 // ---------- shared UI bits ----------
 function CopyButton({ value, label, className = '' }) {
   const [copied, setCopied] = useState(false)
@@ -380,7 +504,7 @@ function SecretRow({ secret, revealed, onToggle }) {
 }
 
 // ---------- credential card ----------
-function CredentialCard({ cred, onEdit, onDelete, onToggleFav }) {
+function CredentialCard({ cred, onEdit, onDelete, onToggleFav, onShare }) {
   const [revealed, setRevealed] = useState(false)
   const hasUrl = Boolean(cred.url)
   return (
@@ -410,6 +534,11 @@ function CredentialCard({ cred, onEdit, onDelete, onToggleFav }) {
           <button onClick={() => onToggleFav(cred)} title={cred.favorite ? 'Unfavorite' : 'Favorite'} className={`icon-btn ${cred.favorite ? '!text-amber-400' : ''}`}>
             <span className="w-4 h-4 block">{icons.star}</span>
           </button>
+          {onShare && (
+            <button onClick={onShare} title="Share" className="icon-btn">
+              <span className="w-4 h-4 block">{icons.share}</span>
+            </button>
+          )}
           <button onClick={onEdit} title="Edit" className="icon-btn">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /></svg>
           </button>
@@ -504,6 +633,106 @@ function CredentialModal({ initial, onClose, onSave }) {
           <button type="submit" className="btn-primary">Save</button>
         </div>
       </form>
+    </Modal>
+  )
+}
+
+// ---------- Share credential modal (owner view) ----------
+function ShareModal({ cred, onClose, push }) {
+  const [users, setUsers] = useState([])
+  const [shares, setShares] = useState([])
+  const [recipient, setRecipient] = useState('')
+  const [permission, setPermission] = useState('read')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(async () => {
+    const [u, s] = await Promise.all([
+      api.get('/vault/shareable-users'),
+      api.get(`/vault/credentials/${cred.id}/shares`),
+    ])
+    setUsers(u.data)
+    setShares(s.data)
+  }, [cred.id])
+  useEffect(() => { load().catch(() => {}) }, [load])
+
+  const add = async (e) => {
+    e.preventDefault()
+    if (!recipient) return
+    setBusy(true); setError('')
+    try {
+      await api.post(`/vault/credentials/${cred.id}/share`, { username: recipient, permission })
+      setRecipient(''); setPermission('read'); await load(); push('Credential shared')
+    } catch (err) { setError(err.response?.data?.detail || 'Failed to share') } finally { setBusy(false) }
+  }
+
+  const changePerm = async (share, perm) => {
+    setError('')
+    try {
+      await api.patch(`/vault/credentials/${cred.id}/shares/${share.id}`, { permission: perm })
+      await load(); push('Permission updated')
+    } catch (err) { setError(err.response?.data?.detail || 'Failed') }
+  }
+
+  const unshare = async (share) => {
+    if (!window.confirm(`Stop sharing "${share.name}" with ${share.recipient}?`)) return
+    setError('')
+    try {
+      await api.delete(`/vault/credentials/${cred.id}/shares/${share.id}`)
+      await load(); push('Sharing removed')
+    } catch (err) { setError(err.response?.data?.detail || 'Failed') }
+  }
+
+  const selectable = users.filter((u) => !shares.some((s) => s.recipient === u.username))
+
+  return (
+    <Modal title={`Share "${cred.name}"`} subtitle="Share a copy with another user. It is re-encrypted with their vault key, so only they can read it." onClose={onClose}>
+      <form onSubmit={add} className="space-y-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className="label">User</label>
+            <select className="input" value={recipient} onChange={(e) => setRecipient(e.target.value)} disabled={selectable.length === 0}>
+              <option value="">{selectable.length === 0 ? 'No users left to share with' : 'Select a user…'}</option>
+              {selectable.map((u) => <option key={u.id} value={u.username}>{u.username}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="label">Permission</label>
+            <select className="input" value={permission} onChange={(e) => setPermission(e.target.value)}>
+              <option value="read">read</option>
+              <option value="write">write</option>
+            </select>
+          </div>
+        </div>
+        {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="btn-ghost">Done</button>
+          <button type="submit" className="btn-primary" disabled={busy || !recipient}><span className="w-4 h-4">{icons.share}</span>{busy ? 'Sharing…' : 'Share'}</button>
+        </div>
+      </form>
+
+      {shares.length > 0 && (
+        <div className="mt-5 pt-4 border-t border-zinc-800">
+          <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 mb-2">Shared with</p>
+          <div className="space-y-2">
+            {shares.map((s) => (
+              <div key={s.id} className="flex items-center justify-between gap-2 rounded-lg border border-zinc-800 bg-surface-950/50 px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-sm text-zinc-200 truncate flex items-center gap-2">{s.recipient}</p>
+                  <p className="text-[11px] text-zinc-500">Shared {s.created_at ? new Date(s.created_at).toLocaleDateString() : ''}</p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <select className="input !py-1 !px-2 text-xs w-auto" value={s.permission} onChange={(e) => changePerm(s, e.target.value)}>
+                    <option value="read">read</option>
+                    <option value="write">write</option>
+                  </select>
+                  <button onClick={() => unshare(s)} title="Stop sharing" className="icon-btn hover:!text-rose-400"><span className="w-4 h-4">{icons.trash}</span></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </Modal>
   )
 }
@@ -755,7 +984,18 @@ function BackupView({ push }) {
         <textarea className="input mono-val resize-none" rows={6} value={importText} onChange={(e) => setImportText(e.target.value)} placeholder='[{"name": "db", "secret": "pw", "category": "db"}]' />
         <div className="mt-3 flex items-center gap-3">
           <button className="btn-primary" disabled={busy || !importText.trim()} onClick={doImport}>{busy && <Spinner />}<span className="w-4 h-4">{icons.upload}</span>Import</button>
-          {msg && <p role="alert" className="text-sm text-rose-400">{msg}</p>}
+      {msg && <p role="alert" className="text-sm text-rose-400">{msg}</p>}
+
+      {tempPw && (
+        <div className="rounded-lg border border-amber-600/40 bg-amber-500/10 p-4 max-w-xl">
+          <p className="text-xs text-amber-300 mb-2 flex items-center gap-1.5"><span className="w-3 h-3">{icons.key}</span>Temporary password for {tempPw.username} - share it securely. They must change it on next sign-in.</p>
+          <div className="flex items-center gap-2">
+            <code className="mono-val !text-[15px] text-amber-200 break-all flex-1 select-all rounded-md bg-surface-950/60 px-3 py-2 border border-amber-700/40">{tempPw.temp_password}</code>
+            <CopyButton value={tempPw.temp_password} label="temp password" className="!p-2" />
+            <button onClick={() => setTempPw(null)} title="Dismiss" className="icon-btn"><span className="w-4 h-4">{icons.close}</span></button>
+          </div>
+        </div>
+      )}
         </div>
       </div>
     </div>
@@ -771,6 +1011,7 @@ function AdminView({ push }) {
   const [password, setPassword] = useState('')
   const [msg, setMsg] = useState('')
   const [busy, setBusy] = useState(false)
+  const [tempPw, setTempPw] = useState(null)
 
   const loadUsers = useCallback(() => api.get('/users').then((r) => setUsers(r.data)).catch(() => {}), [])
   const loadLog = useCallback(() => api.get('/users/audit-log?limit=200').then((r) => setLog(r.data)).catch(() => {}), [])
@@ -796,6 +1037,16 @@ function AdminView({ push }) {
     setBusy(true); setMsg('')
     try {
       await api.post(`/users/${id}/reset-vault`); loadUsers(); push(`Reset vault for ${name}`)
+    } catch (err) { setMsg(err.response?.data?.detail || 'Failed') } finally { setBusy(false) }
+  }
+
+  const resetPwd = async (id, name) => {
+    if (!window.confirm(`Reset ${name}'s password? They'll be given a temporary password and must change it on next sign-in.`)) return
+    setBusy(true); setMsg('')
+    try {
+      const r = await api.post(`/users/${id}/reset-password`)
+      setTempPw(r.data)
+      loadUsers(); push('Password reset')
     } catch (err) { setMsg(err.response?.data?.detail || 'Failed') } finally { setBusy(false) }
   }
 
@@ -833,6 +1084,7 @@ function AdminView({ push }) {
                   </div>
                   {!u.is_admin && (
                     <div className="flex items-center gap-2 shrink-0">
+                      <button disabled={busy} onClick={() => resetPwd(u.id, u.username)} className="btn-ghost text-xs">Reset password</button>
                       <button disabled={busy} onClick={() => { if (window.confirm(`Reset ${u.username}'s vault? Their credentials will be wiped.`)) resetVault(u.id, u.username) }} className="btn-ghost text-xs">Reset vault</button>
                       <button disabled={busy} onClick={() => { if (window.confirm(`Delete user ${u.username}?`)) del(u.id, u.username) }} className="btn-ghost !text-rose-400 text-xs">Delete</button>
                     </div>
@@ -866,8 +1118,112 @@ function AdminView({ push }) {
   )
 }
 
+// ---------- Shared credentials view (recipient) ----------
+function SharedView({ push }) {
+  const [shares, setShares] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [modal, setModal] = useState(null)
+  const [confirm, setConfirm] = useState(null)
+
+  const load = useCallback(() => {
+    setLoading(true); setError('')
+    api.get('/vault/shared').then((r) => setShares(r.data)).catch((e) => setError(e.response?.data?.detail || 'Failed to load shared credentials')).finally(() => setLoading(false))
+  }, [])
+  useEffect(load, [load])
+
+  const save = async (form) => {
+    await api.put(`/vault/shared/${modal.share_id}`, form)
+    load(); push('Shared credential updated')
+  }
+
+  const remove = async (id) => {
+    await api.delete(`/vault/shared/${id}`)
+    load(); push('Removed shared credential')
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">Shared with me</h1>
+        <p className="text-sm text-zinc-500 mt-1">Credentials other users shared with you, plus your access level.</p>
+      </div>
+
+      {error && <ErrorBanner message={error} onRetry={load} />}
+
+      {loading ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{[0, 1, 2, 3].map((i) => (
+          <div key={i} className="card p-4 space-y-3"><div className="flex items-center gap-3"><div className="skeleton h-9 w-9 rounded-lg" /><div className="space-y-2 flex-1"><div className="skeleton h-4 w-2/3" /><div className="skeleton h-3 w-1/3" /></div></div><div className="skeleton h-9 w-full" /></div>
+        ))}</div>
+      ) : shares.length === 0 ? (
+        <div className="text-center py-20 animate-rise">
+          <div className="mx-auto w-12 h-12 rounded-xl bg-surface-800 border border-zinc-700/60 text-emerald-400 flex items-center justify-center mb-4"><span className="w-6 h-6">{icons.share}</span></div>
+          <p className="text-sm font-medium text-zinc-200">Nothing shared with you yet</p>
+          <p className="text-sm text-zinc-500 mt-1">When someone shares a credential, it shows up here.</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {shares.map((s) => (
+            <SharedCard key={s.share_id} s={s} canWrite={s.permission === 'write'}
+              onEdit={() => setModal({ share_id: s.share_id, ...s })}
+              onRemove={() => setConfirm({ title: 'Remove shared credential', message: `Remove "${s.name}" shared by ${s.owner} from your vault?`, onConfirm: () => remove(s.share_id) })} />
+          ))}
+        </div>
+      )}
+
+      {modal && <CredentialModal initial={modal} onClose={() => setModal(null)} onSave={save} />}
+      {confirm && <ConfirmModal title={confirm.title} message={confirm.message} onConfirm={async () => { await confirm.onConfirm(); setConfirm(null) }} onClose={() => setConfirm(null)} />}
+    </div>
+  )
+}
+
+function SharedCard({ s, canWrite, onEdit, onRemove }) {
+  const [revealed, setRevealed] = useState(false)
+  const hasUrl = Boolean(s.url)
+  return (
+    <article className="card p-4 transition-colors hover:border-zinc-700 animate-rise">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-9 h-9 rounded-lg bg-surface-800 border border-zinc-700/70 text-sky-300 flex items-center justify-center shrink-0">
+            <span className="w-4 h-4">{icons.share}</span>
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-zinc-100 truncate">{s.name}</p>
+            <div className="flex items-center gap-1.5">
+              {s.owner && <p className="text-xs text-zinc-500 truncate">from {s.owner}</p>}
+              <span className={`shrink-0 inline-flex items-center gap-0.5 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${s.permission === 'write' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-zinc-700/60 text-zinc-300'}`}>
+                <span className="w-2.5 h-2.5">{s.permission === 'write' ? icons.key : icons.eye}</span>{s.permission}
+              </span>
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          {canWrite && (
+            <button onClick={onEdit} title="Edit" className="icon-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /></svg>
+            </button>
+          )}
+          <button onClick={onRemove} title="Remove" className="icon-btn hover:!text-rose-400">
+            <span className="w-4 h-4 block">{icons.trash}</span>
+          </button>
+        </div>
+      </div>
+      <div className="mt-3 space-y-2">
+        <SecretRow secret={s.secret} revealed={revealed} onToggle={() => setRevealed(!revealed)} />
+        {hasUrl && (
+          <a href={s.url} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 text-xs text-emerald-400/90 hover:text-emerald-300 truncate">
+            <span className="w-3 h-3 shrink-0">{icons.link}</span>
+            <span className="truncate">{s.url.replace(/^https?:\/\//, '')}</span>
+          </a>
+        )}
+        {s.description && <p className="text-xs text-zinc-500 leading-relaxed">{s.description}</p>}
+      </div>
+    </article>
+  )
+}
+
 // ---------- Credentials view ----------
-function CredentialsView({ creds, loading, error, reload, onAdd, onEdit, onDelete, onToggleFav }) {
+function CredentialsView({ creds, loading, error, reload, onAdd, onEdit, onDelete, onToggleFav, onShare }) {
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState('all') // all | favorites
   const [category, setCategory] = useState('')
@@ -919,7 +1275,7 @@ function CredentialsView({ creds, loading, error, reload, onAdd, onEdit, onDelet
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {filtered.map((c) => (
-            <CredentialCard key={c.id} cred={c} onEdit={() => onEdit(c)} onDelete={() => onDelete(c)} onToggleFav={() => onToggleFav(c)} />
+            <CredentialCard key={c.id} cred={c} onEdit={() => onEdit(c)} onDelete={() => onDelete(c)} onToggleFav={() => onToggleFav(c)} onShare={onShare ? () => onShare(c) : undefined} />
           ))}
         </div>
       )}
@@ -935,6 +1291,7 @@ function Dashboard({ username, isAdmin, onLock, onLogout, push, dark, onToggleDa
   const [error, setError] = useState('')
   const [modal, setModal] = useState(null)
   const [confirm, setConfirm] = useState(null)
+  const [shareModal, setShareModal] = useState(null)
 
   const load = useCallback(() => {
     setLoading(true); setError('')
@@ -966,6 +1323,7 @@ function Dashboard({ username, isAdmin, onLock, onLogout, push, dark, onToggleDa
 
   const navItems = [
     { id: 'credentials', label: 'Credentials', icon: icons.lock },
+    { id: 'shared', label: 'Shared with me', icon: icons.share },
     { id: 'tokens', label: 'API tokens', icon: icons.key },
     { id: 'security', label: 'Security', icon: icons.shield },
     { id: 'backup', label: 'Backup', icon: icons.download },
@@ -1017,8 +1375,9 @@ function Dashboard({ username, isAdmin, onLock, onLogout, push, dark, onToggleDa
             <CredentialsView creds={creds} loading={loading} error={error} reload={load}
               onAdd={() => setModal({})} onEdit={(c) => setModal({ cred: c })}
               onDelete={(c) => setConfirm({ title: 'Delete credential', message: `Delete "${c.name}"?`, onConfirm: () => doDelete(c.id) })}
-              onToggleFav={toggleFav} />
+              onToggleFav={toggleFav} onShare={(c) => setShareModal(c)} />
           )}
+          {view === 'shared' && <SharedView push={push} />}
           {view === 'tokens' && <TokensView push={push} />}
           {view === 'security' && <SecurityView push={push} />}
           {view === 'backup' && <BackupView push={push} />}
@@ -1027,6 +1386,7 @@ function Dashboard({ username, isAdmin, onLock, onLogout, push, dark, onToggleDa
       </main>
 
       {modal && <CredentialModal initial={modal.cred} onClose={() => setModal(null)} onSave={save} />}
+      {shareModal && <ShareModal cred={shareModal} onClose={() => setShareModal(null)} push={push} />}
       {confirm && <ConfirmModal title={confirm.title} message={confirm.message} onConfirm={async () => { await confirm.onConfirm(); setConfirm(null) }} onClose={() => setConfirm(null)} />}
     </div>
   )
@@ -1036,6 +1396,8 @@ function Dashboard({ username, isAdmin, onLock, onLogout, push, dark, onToggleDa
 export default function App() {
   const [authed, setAuthed] = useState(!!localStorage.getItem('cv_token'))
   const [unlocked, setUnlocked] = useState(!!localStorage.getItem('cv_vault_token'))
+  const [mustChange, setMustChange] = useState(false)
+  const [mfaEnabled, setMfaEnabled] = useState(false)
   const [username, setUsername] = useState('')
   const [isAdmin, setIsAdmin] = useState(false)
   const { push, toastHost } = useToasts()
@@ -1052,7 +1414,7 @@ export default function App() {
 
   useEffect(() => {
     if (!authed) return
-    api.get('/auth/me').then((r) => { setUsername(r.data.username); setIsAdmin(r.data.is_admin) }).catch((err) => {
+    api.get('/auth/me').then((r) => { setUsername(r.data.username); setIsAdmin(r.data.is_admin); setMustChange(!!r.data.must_change_password); setMfaEnabled(!!r.data.mfa_enabled) }).catch((err) => {
       if (err.response?.status === 401) { clearSession(); setAuthed(false); setUnlocked(false) }
     })
   }, [authed])
@@ -1074,6 +1436,8 @@ export default function App() {
   const handleLogin = (data) => {
     setUsername(data.username)
     setIsAdmin(!!data.is_admin)
+    setMustChange(!!data.must_change_password)
+    setMfaEnabled(!!data.mfa_enabled)
     setAuthed(true)
     setUnlocked(false)
   }
@@ -1087,7 +1451,11 @@ export default function App() {
   return (
     <>
       {!authed ? <LoginPage onLogin={handleLogin} />
-        : !unlocked ? <UnlockPage username={username} onUnlocked={() => setUnlocked(true)} onLogout={logout} />
+        : !unlocked ? (
+          mustChange
+            ? <ChangePasswordPage username={username} mfaEnabled={mfaEnabled} onChanged={() => setMustChange(false)} onLogout={logout} />
+            : <UnlockPage username={username} onUnlocked={() => setUnlocked(true)} onLogout={logout} />
+        )
           : <Dashboard username={username} isAdmin={isAdmin} onLock={lock} onLogout={logout} push={push} dark={dark} onToggleDark={() => setDark(!dark)} />}
       {toastHost}
     </>
