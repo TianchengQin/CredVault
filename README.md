@@ -44,7 +44,7 @@ with AI agents.
 | 🔑 **Password reset** | An admin can reset a user to a temporary password; the user then sets a new one (with MFA) on next sign-in. |
 | 💾 **Backup / restore** | Export to JSON, import to restore or merge. Peace of mind. |
 | 🤖 **AI-agent friendly** | API tokens (`read`/`write`) + an MCP server so agents can work for you. |
-| 🎨 **Apple-tasteful UI** | Parchment-clean surfaces, Action Blue accent, dark mode. Easy on the eyes. |
+| 🎨 **Focused UI** | Two-pane vault browser, categories in the sidebar, password generator & strength meter, light/dark themes. |
 
 > 🧠 *Why another password manager?* Because we believe your secrets should be
 > encrypted with a key only *you* hold — not one a cloud vendor keeps for you.
@@ -66,7 +66,8 @@ Then open **https://<host-ip>:8904** (browsers warn about the self-signed cert �
 
 - **First run:** set your vault master password. It **cannot be recovered** if forgotten. 🫡
 - **Not set in `.env`?** The entrypoint auto-generates a strong `ADMIN_PASSWORD` and
-  `SECRET_KEY`, persists them under `./data/`, and prints them once to the container logs.
+  `SECRET_KEY` and persists them under `./data/` (never in the logs). Read the admin password with
+  `docker compose exec credvault cat /data/.admin_password`.
 
 > 🔐 **Never run it with a weak default.** If you see the warning about the insecure
 > admin password or secret key, set real values in your environment. This repo ships
@@ -78,7 +79,12 @@ Then open **https://<host-ip>:8904** (browsers warn about the self-signed cert �
 |---|---|
 | `ADMIN_USERNAME` | First admin login name (default `admin`) |
 | `ADMIN_PASSWORD` | First admin login password — **strongly recommended to set** |
-| `SECRET_KEY` | Long random value used to sign sessions — **set this** |
+| `SECRET_KEY` | Random value (≥ 32 chars) used to sign sessions — generated if unset |
+| `ALLOW_REGISTRATION` | Let anyone reach the sign-up form (default `true`) |
+| `VAULT_IDLE_MINUTES` | Auto-lock an unlocked vault after this idle time (default `15`) |
+| `SESSION_MINUTES` | Sign-in session lifetime (default `720`) |
+| `ENABLE_API_DOCS` | Serve OpenAPI docs at `/docs` (default off) |
+| `CORS_ORIGINS` | Comma-separated origins allowed cross-origin (default none) |
 | `DATABASE_URL` | SQLAlchemy URL (default: SQLite in `./data`) |
 
 Volumes: `./data` (SQLite DB) and `./certs` (TLS). Both are git-ignored — they live on your box only.
@@ -87,7 +93,8 @@ Volumes: `./data` (SQLite DB) and `./certs` (TLS). Both are git-ignored — they
 
 ## 🧩 The app at a glance
 
-- **Sidebar** to hop between Credentials, API tokens, Security (2FA), Backup, and Admin.
+- **Sidebar** with All items, Favorites, Shared with me, your categories, and Settings (API tokens, Security, Backup, Admin).
+- **Two-pane browser:** search with `/`, copy username/password in one click (clipboard auto-clears after 30s).
 - **Modals stay put** — closing a panel is a deliberate click on ✕ / Cancel, never an accidental outside-click. 🙅
 - **Dark mode** 🌙 — toggle in the sidebar, follows your OS preference by default.
 
@@ -104,14 +111,16 @@ Tokens are scoped to one user's vault, with `read` or `write` permission. The se
 
 ### MCP server (AI agents)
 
+Works on Windows, macOS and Linux:
+
 ```bash
-cd mcp_server && python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
-export CREDVAULT_URL=https://<host>:8904
-export CREDVAULT_API_TOKEN=<write-or-read-token>
-python server.py   # speaks MCP over stdio
+pipx install ./mcp_server            # or: uvx --from ./mcp_server credvault-mcp
+CREDVAULT_URL=https://<host>:8904 CREDVAULT_API_TOKEN=<token> CREDVAULT_CA_CERT=./certs/server.crt credvault-mcp --check
 ```
 
-Tools: `list_credentials`, `get_credential`, `create_credential`, `update_credential`, `delete_credential`.
+Or run `mcp_server/run.sh`, `run.ps1` or `run.cmd`, which bootstrap a venv on first use.
+Config can also live in a per-user `mcp.json`. See [mcp_server/README.md](mcp_server/README.md)
+for client setup (Claude Desktop / Claude Code) and the tool list.
 
 ---
 
@@ -120,13 +129,16 @@ Tools: `list_credentials`, `get_credential`, `create_credential`, `update_creden
 - **Per-user vaults.** Each vault key is derived (Argon2id) from that user's master password. Credentials are AES-256-GCM encrypted; admins manage accounts but can't decrypt your vault.
 - **Shared credentials stay encrypted for the recipient.** Sharing re-encrypts a copy with the recipient's vault key, so only they can decrypt it. The recipient must have unlocked their vault recently for the share to be created; edits to a shared copy are independent (a snapshot).
 - **No secrets at rest in the repo.** The database, TLS keys, and generated secrets live under `data/` and `certs/` — both git-ignored.
-- **Brute-force armor:** 5 failed login/unlock attempts → 15-minute lockout.
-- **Optional TOTP 2FA** enforced at sign-in when enabled.
-- **Auto-lock** after inactivity (client + server-side TTL).
+- **Sharing uses public-key crypto.** Each vault has an X25519 keypair (private key wrapped by the vault key); shares are sealed to the recipient's public key, so recipients don't need to be online.
+- **Brute-force armor:** per-account and per-IP lockouts on login, vault unlock, 2FA and password change.
+- **Optional TOTP 2FA** enforced at sign-in; codes are single-use.
+- **Sessions are revocable:** changing or resetting a password signs out every session and re-locks every unlocked vault.
+- **Auto-lock** after inactivity (sliding server-side TTL + client timer). Vault handles are bound to the user they were issued to and live only in memory.
+- **Hardened HTTP:** strict CSP, no CORS by default, no-store on API responses, frame denial, path-traversal-safe static serving. The container runs as an unprivileged user.
 - **Login password ≠ vault master password.** An admin can reset a user's *login* password to a temporary one (the user is forced to set a new one, with MFA, on next sign-in) without touching the vault. The vault is separate.
 - **Lost your master password?** Your vault is unrecoverable by design. An admin can **reset** a vault so the user starts fresh (this wipes that vault's credentials).
 
-> 📖 Full API & token management details live in the app and its OpenAPI docs at `/docs`.
+> 📖 Set `ENABLE_API_DOCS=true` to browse the OpenAPI docs at `/docs`.
 
 ---
 
@@ -144,8 +156,12 @@ Tools: `list_credentials`, `get_credential`, `create_credential`, `update_creden
 ## 🧑‍💻 Local development
 
 ```bash
-# backend
-cd backend && uvicorn app.main:app --reload --port 8443
+# backend (plain HTTP for local dev)
+cd backend && pip install -r requirements-dev.txt
+CREDVAULT_ALLOW_INSECURE=1 DATABASE_URL=sqlite:///./dev.db STATIC_DIR=../frontend/dist uvicorn app.main:app --reload --port 8443
+
+# tests
+cd backend && pytest
 
 # frontend (proxies /api to :8443)
 cd frontend && npm install && npm run dev

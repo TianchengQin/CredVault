@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "credvault-mcp"
+version = "2.0.0"
+description = "MCP server that gives AI agents scoped access to a CredVault vault"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.2,<2", "httpx>=0.27"]
+classifiers = [
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+]
+
+[project.scripts]
+credvault-mcp = "credvault_mcp.server:main"
+
+[tool.setuptools]
+packages = ["credvault_mcp"]

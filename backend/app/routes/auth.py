@@ -1,161 +1,169 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Request
 
-from ..database import get_db
-from .. import schemas, auth, crypto
-from .. import audit
+from .. import audit, crypto, schemas, security
+from ..config import settings
+from ..deps import DB, CurrentUser
+from ..errors import BadRequest, Forbidden, TooManyAttempts, Unauthorized
 from ..models import User
-from ..security import login_limiter
+from ..security import ip_limiter, login_limiter, mfa_limiter
+from ..services import accounts
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-def _login_key(request: Request, username: str) -> str:
-    return f"{request.client.host if request.client else '?'}:{username.lower()}"
+def _throttle(*checks: tuple[security.RateLimiter, str]) -> None:
+    for limiter, key in checks:
+        if wait := limiter.retry_after(key):
+            raise TooManyAttempts(wait)
 
 
-@router.post("/login", response_model=schemas.LoginResponse)
-def login(body: schemas.LoginRequest, request: Request, db: Session = Depends(get_db)):
-    key = _login_key(request, body.username)
-    allowed, retry_after = login_limiter.check(key)
-    if not allowed:
-        raise HTTPException(status_code=429, detail=f"Too many attempts. Try again in {retry_after}s.")
+def _verify_totp(db, user: User, code: str) -> bool:
+    """Check a TOTP code and burn its time step so it can't be reused."""
+    counter = crypto.totp_match(user.totp_secret or "", code, after_counter=user.totp_last_counter or 0)
+    if counter is None:
+        return False
+    user.totp_last_counter = counter
+    db.commit()
+    return True
 
-    user = db.query(User).filter(User.username == body.username).first()
-    if not user or not auth.verify_login_password(body.password, user.login_hash):
+
+@router.post("/login", response_model=schemas.Session)
+def login(body: schemas.LoginRequest, request: Request, db: DB):
+    ip = audit.client_ip(request)
+    account_key = f"{ip}:{body.username.lower()}"
+    _throttle((ip_limiter, ip), (login_limiter, account_key))
+
+    user = accounts.find_by_username(db, body.username)
+    if not security.verify_password(body.password, user.login_hash if user else None):
+        login_limiter.fail(account_key)
+        ip_limiter.fail(ip)
+        audit.record(db, "login_failed", username=body.username, request=request)
+        raise Unauthorized("Invalid username or password")
+
+    login_limiter.reset(account_key)
+    if user.totp_enabled:
+        audit.record(db, "login_password_ok", user=user, request=request)
+        return schemas.Session(
+            **accounts.profile(user).model_dump(exclude={"token", "mfa_required", "mfa_token"}),
+            mfa_required=True, mfa_token=security.create_mfa_ticket(user.id, user.token_version or 0),
+        )
+    audit.record(db, "login", user=user, request=request)
+    return accounts.session_for(user)
+
+
+@router.post("/2fa/confirm", response_model=schemas.Session)
+def confirm_mfa(body: schemas.MfaConfirmRequest, request: Request, db: DB):
+    user_id, version = security.decode_mfa_ticket(body.mfa_token)
+    key = f"mfa:{user_id}"
+    _throttle((mfa_limiter, key))
+
+    user = db.get(User, user_id)
+    if user is None or not user.totp_enabled or (user.token_version or 0) != version:
+        raise Unauthorized("Verification expired, please sign in again")
+    if not _verify_totp(db, user, body.code):
+        mfa_limiter.fail(key)
+        audit.record(db, "mfa_failed", user=user, request=request)
+        raise Unauthorized("Invalid 2FA code")
+
+    mfa_limiter.reset(key)
+    audit.record(db, "login_mfa", user=user, request=request)
+    return accounts.session_for(user)
+
+
+@router.get("/config")
+def public_config():
+    """Unauthenticated settings the sign-in screen needs."""
+    return {
+        "allow_registration": settings.allow_registration,
+        "min_password": settings.min_login_password,
+        "min_master_password": settings.min_master_password,
+    }
+
+
+@router.post("/register", response_model=schemas.Session, status_code=201)
+def register(body: schemas.RegisterRequest, request: Request, db: DB):
+    if not settings.allow_registration:
+        raise Forbidden("Self-registration is disabled. Ask an administrator for an account.")
+    ip = audit.client_ip(request)
+    _throttle((ip_limiter, ip))
+    ip_limiter.fail(ip)  # every registration counts toward the per-IP budget
+
+    user = accounts.create(db, body.username, body.password)
+    audit.record(db, "user_register", user=user, request=request, commit=False)
+    db.commit()
+    return accounts.session_for(user)
+
+
+@router.get("/me", response_model=schemas.Session)
+def me(user: CurrentUser):
+    return accounts.profile(user)
+
+
+@router.post("/change-password", response_model=schemas.Session)
+def change_password(body: schemas.ChangePasswordRequest, user: CurrentUser, request: Request, db: DB):
+    """Re-verifies the current password (and 2FA when enabled).
+
+    Every existing session is revoked; the response carries a fresh one for this client.
+    """
+    key = f"pw:{user.id}"
+    _throttle((login_limiter, key))
+    if not security.verify_password(body.current_password, user.login_hash):
         login_limiter.fail(key)
-        audit.log(db, username=body.username, action="login_failed", ip=audit.client_ip(request))
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+        raise BadRequest("Current password is incorrect")
+    if user.totp_enabled and not _verify_totp(db, user, body.mfa_code):
+        login_limiter.fail(key)
+        raise BadRequest("Invalid 2FA code")
+    if body.new_password == body.current_password:
+        raise BadRequest("New password must differ from the current one")
+    accounts.check_password_policy(body.new_password, user.username)
 
     login_limiter.reset(key)
-    audit.log(db, user_id=user.id, username=user.username, action="login", ip=audit.client_ip(request))
+    accounts.set_password(user, body.new_password)
+    audit.record(db, "password_change", user=user, request=request)
+    return accounts.session_for(user)
 
-    must_change = bool(user.must_change_password)
+
+# ---------------------------------------------------------------- 2FA management
+
+@router.get("/2fa/status", response_model=schemas.MfaStatus)
+def mfa_status(user: CurrentUser):
+    return schemas.MfaStatus(enabled=bool(user.totp_enabled), username=user.username)
+
+
+@router.post("/2fa/setup", response_model=schemas.MfaSetup)
+def setup_2fa(user: CurrentUser, db: DB):
+    # Never reveal the secret of an active 2FA enrolment.
     if user.totp_enabled:
-        mfa_token = auth.create_mfa_token(user.id)
-        return schemas.LoginResponse(
-            token="", username=user.username, is_admin=bool(user.is_admin),
-            mfa_required=True, mfa_token=mfa_token,
-            must_change_password=must_change, mfa_enabled=True,
-        )
-
-    token = auth.create_access_token(user.id)
-    return schemas.LoginResponse(
-        token=token, username=user.username, is_admin=bool(user.is_admin),
-        must_change_password=must_change, mfa_enabled=bool(user.totp_enabled),
-    )
-
-
-@router.post("/register", response_model=schemas.LoginResponse, status_code=201)
-def register(body: schemas.UserCreate, request: Request, db: Session = Depends(get_db)):
-    """Self-service account registration. Creates a normal (non-admin) user and signs them in."""
-    key = _login_key(request, body.username)
-    allowed, retry_after = login_limiter.check(key)
-    if not allowed:
-        raise HTTPException(status_code=429, detail=f"Too many attempts. Try again in {retry_after}s.")
-
-    username = body.username.strip()
-    if not username or not body.password:
-        raise HTTPException(status_code=400, detail="Username and password are required")
-    if len(body.password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
-    if db.query(User).filter(User.username == username).first():
-        raise HTTPException(status_code=400, detail="Username already exists")
-
-    user = User(username=username, login_hash=auth.hash_login_password(body.password), is_admin=0)
-    db.add(user)
+        raise BadRequest("2FA is already enabled")
+    user.totp_secret = crypto.generate_totp_secret()
+    user.totp_last_counter = 0
     db.commit()
-    db.refresh(user)
-    audit.log(db, user_id=user.id, username=user.username, action="user_register", ip=audit.client_ip(request))
-    token = auth.create_access_token(user.id)
-    return schemas.LoginResponse(token=token, username=user.username, is_admin=False)
+    return schemas.MfaSetup(secret=user.totp_secret, otpauth_url=crypto.otpauth_uri(user.totp_secret, user.username))
 
 
-@router.post("/2fa/confirm", response_model=schemas.LoginResponse)
-def confirm_mfa(body: schemas.MfaConfirmLoginRequest, request: Request, db: Session = Depends(get_db)):
-    user_id = auth.decode_mfa_token(body.mfa_token)
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user or not user.totp_enabled or not user.totp_secret:
-        raise HTTPException(status_code=401, detail="2FA not enabled")
-    if not crypto.totp_verify(user.totp_secret, body.code):
-        audit.log(db, user_id=user.id, username=user.username, action="mfa_failed", ip=audit.client_ip(request))
-        raise HTTPException(status_code=401, detail="Invalid 2FA code")
-    audit.log(db, user_id=user.id, username=user.username, action="login_mfa", ip=audit.client_ip(request))
-    token = auth.create_access_token(user.id)
-    return schemas.LoginResponse(
-        token=token, username=user.username, is_admin=bool(user.is_admin),
-        must_change_password=bool(user.must_change_password), mfa_enabled=True,
-    )
-
-
-@router.get("/2fa/setup", response_model=schemas.MfaSetupResponse)
-def setup_2fa(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
-    secret = user.totp_secret or crypto.generate_totp_secret()
-    user.totp_secret = secret
-    db.commit()
-    return schemas.MfaSetupResponse(secret=secret, otpauth_url=crypto.otpauth_uri(secret, user.username))
-
-
-@router.post("/2fa/verify")
-def verify_2fa(body: schemas.MfaCodeRequest, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+@router.post("/2fa/verify", response_model=schemas.MfaStatus)
+def verify_2fa(body: schemas.MfaCodeRequest, user: CurrentUser, request: Request, db: DB):
+    if user.totp_enabled:
+        raise BadRequest("2FA is already enabled")
     if not user.totp_secret:
-        raise HTTPException(status_code=400, detail="No 2FA secret set up yet")
-    if not crypto.totp_verify(user.totp_secret, body.code):
-        raise HTTPException(status_code=400, detail="Invalid 2FA code")
+        raise BadRequest("Start 2FA setup first")
+    if not _verify_totp(db, user, body.code):
+        raise BadRequest("Invalid 2FA code")
     user.totp_enabled = 1
-    db.commit()
-    audit.log(db, user_id=user.id, username=user.username, action="2fa_enabled")
-    return {"ok": True, "enabled": True}
+    audit.record(db, "2fa_enabled", user=user, request=request)
+    return schemas.MfaStatus(enabled=True, username=user.username)
 
 
-@router.post("/2fa/disable")
-def disable_2fa(body: schemas.MfaCodeRequest, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
+@router.post("/2fa/disable", response_model=schemas.MfaStatus)
+def disable_2fa(body: schemas.MfaCodeRequest, user: CurrentUser, request: Request, db: DB):
+    key = f"mfa-off:{user.id}"
+    _throttle((mfa_limiter, key))
     if not user.totp_enabled:
-        raise HTTPException(status_code=400, detail="2FA is not enabled")
-    if not crypto.totp_verify(user.totp_secret, body.code):
-        raise HTTPException(status_code=400, detail="Invalid 2FA code")
+        raise BadRequest("2FA is not enabled")
+    if not _verify_totp(db, user, body.code):
+        mfa_limiter.fail(key)
+        raise BadRequest("Invalid 2FA code")
     user.totp_enabled = 0
     user.totp_secret = None
-    db.commit()
-    audit.log(db, user_id=user.id, username=user.username, action="2fa_disabled")
-    return {"ok": True, "enabled": False}
-
-
-@router.get("/2fa/status")
-def mfa_status(user: User = Depends(auth.get_current_user)):
-    return {"enabled": bool(user.totp_enabled), "username": user.username}
-
-
-@router.get("/me", response_model=schemas.LoginResponse)
-def me(user: User = Depends(auth.get_current_user)):
-    return schemas.LoginResponse(
-        token="", username=user.username, is_admin=bool(user.is_admin),
-        must_change_password=bool(user.must_change_password),
-        mfa_enabled=bool(user.totp_enabled),
-    )
-
-
-@router.post("/change-password")
-def change_password(
-    body: schemas.ChangePasswordRequest,
-    user: User = Depends(auth.get_current_user),
-    db: Session = Depends(get_db),
-    request: Request = None,
-):
-    """Change the current user's login password.
-
-    Re-verifies the current password and, when MFA is enabled, requires a
-    valid 2FA code. Clears the must-change-password flag.
-    """
-    if not auth.verify_login_password(body.current_password, user.login_hash):
-        raise HTTPException(status_code=400, detail="Current password is incorrect")
-    if len(body.new_password) < 8:
-        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
-    if user.totp_enabled:
-        if not user.totp_secret or not crypto.totp_verify(user.totp_secret, body.mfa_code):
-            raise HTTPException(status_code=400, detail="Invalid 2FA code")
-    user.login_hash = auth.hash_login_password(body.new_password)
-    user.must_change_password = 0
-    db.commit()
-    audit.log(db, user_id=user.id, username=user.username, action="password_change", ip=audit.client_ip(request))
-    return {"ok": True}
+    audit.record(db, "2fa_disabled", user=user, request=request)
+    return schemas.MfaStatus(enabled=False, username=user.username)

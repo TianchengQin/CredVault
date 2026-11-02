@@ -1,5 +1,12 @@
 node_modules
+**/node_modules
 .venv
-__pycache__
+**/__pycache__
 *.pyc
 .git
+data
+certs
+.env
+frontend/dist
+backend/tests
+mcp_server

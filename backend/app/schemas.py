@@ -1,130 +1,202 @@
-from pydantic import BaseModel, Field
+from datetime import datetime, timezone
+from typing import Annotated, Literal
+
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, field_validator
+
+Permission = Literal["read", "write"]
+# SQLite hands back naive datetimes; they are UTC, so say so on the wire.
+UtcDatetime = Annotated[datetime, AfterValidator(lambda d: d if d.tzinfo else d.replace(tzinfo=timezone.utc))]
+Username = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=64, pattern=r"^[A-Za-z0-9._@-]+$")]
+Password = Annotated[str, StringConstraints(min_length=1, max_length=256)]
+TotpCode = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\d{6}$")]
 
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
+class Model(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
-class LoginResponse(BaseModel):
-    token: str
+# ---------------------------------------------------------------- auth
+
+class LoginRequest(Model):
+    username: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+    password: Password
+
+
+class RegisterRequest(Model):
+    username: Username
+    password: Password
+
+
+class Session(BaseModel):
+    """Returned by login/register/me. ``token`` is empty when MFA is still pending."""
+    token: str = ""
     username: str
     is_admin: bool = False
     mfa_required: bool = False
     mfa_token: str = ""
-    must_change_password: bool = False
     mfa_enabled: bool = False
+    must_change_password: bool = False
 
 
-class ChangePasswordRequest(BaseModel):
-    current_password: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=8)
-    mfa_code: str = ""
+class MfaConfirmRequest(Model):
+    mfa_token: str = Field(max_length=2048)
+    code: TotpCode
 
 
-class MfaConfirmLoginRequest(BaseModel):
-    mfa_token: str
-    code: str
+class MfaCodeRequest(Model):
+    code: TotpCode
 
 
-class MfaCodeRequest(BaseModel):
-    code: str = Field(..., min_length=6, max_length=6)
-
-
-class MfaSetupResponse(BaseModel):
+class MfaSetup(BaseModel):
     secret: str
     otpauth_url: str
 
 
-class VaultUnlockRequest(BaseModel):
-    master_password: str
+class MfaStatus(BaseModel):
+    enabled: bool
+    username: str
 
 
-class VaultUnlockResponse(BaseModel):
-    vault_token: str
+class ChangePasswordRequest(Model):
+    current_password: Password
+    new_password: Password
+    mfa_code: str = Field(default="", max_length=6)
+
+
+# ---------------------------------------------------------------- vault
+
+class VaultStatus(BaseModel):
+    setup_required: bool
+
+
+class MasterPassword(Model):
+    master_password: Password
+
+
+class VaultUnlocked(BaseModel):
+    vault_token: str = ""
     setup_required: bool = False
+    idle_seconds: int = 0
 
 
-class CredentialIn(BaseModel):
-    name: str = Field(..., min_length=1)
-    secret: str = Field(..., min_length=1)
-    url: str = ""
-    username: str = ""
-    description: str = ""
-    category: str = ""
+class CredentialIn(Model):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    secret: Annotated[str, StringConstraints(min_length=1, max_length=10_000)]
+    url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2048)] = ""
+    username: Annotated[str, StringConstraints(max_length=256)] = ""
+    description: Annotated[str, StringConstraints(max_length=5_000)] = ""
+    category: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)] = ""
     favorite: bool = False
+
+    def secret_payload(self) -> dict:
+        return {"secret": self.secret, "url": self.url, "username": self.username, "description": self.description}
+
+
+class CredentialPatch(Model):
+    """Partial update; only the fields provided are changed."""
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)] | None = None
+    secret: Annotated[str, StringConstraints(min_length=1, max_length=10_000)] | None = None
+    url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2048)] | None = None
+    username: Annotated[str, StringConstraints(max_length=256)] | None = None
+    description: Annotated[str, StringConstraints(max_length=5_000)] | None = None
+    category: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)] | None = None
+    favorite: bool | None = None
 
 
 class CredentialOut(BaseModel):
     id: int
     name: str
+    secret: str
     url: str = ""
     username: str = ""
     description: str = ""
     category: str = ""
     favorite: bool = False
-    # secret omitted from default output; only returned when explicitly decrypted
+    updated_at: UtcDatetime | None = None
 
 
-class CredentialFull(CredentialOut):
-    secret: str
+class SharedCredentialOut(CredentialOut):
+    share_id: int
+    permission: Permission
+    owner: str = ""
 
 
-class UserCreate(BaseModel):
+class ImportItem(CredentialIn):
+    model_config = ConfigDict(extra="ignore")  # tolerate extra keys from other exporters
+
+
+class ImportRequest(Model):
+    items: list[ImportItem] = Field(max_length=5_000)
+
+
+class ImportResult(BaseModel):
+    imported: int
+
+
+# ---------------------------------------------------------------- sharing
+
+class ShareRequest(Model):
+    username: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+    permission: Permission
+
+
+class SharePermissionUpdate(Model):
+    permission: Permission
+
+
+class ShareOut(BaseModel):
+    id: int
+    name: str
+    permission: Permission
+    recipient: str = ""
+    created_at: UtcDatetime | None = None
+    source_credential_id: int | None = None
+
+
+class ShareableUser(BaseModel):
+    id: int
     username: str
-    password: str
+    can_receive: bool = True
 
 
-class ApiTokenIn(BaseModel):
-    name: str = Field(..., min_length=1)
-    permission: str = Field(..., pattern="^(read|write)$")
+# ---------------------------------------------------------------- tokens
+
+class ApiTokenIn(Model):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+    permission: Permission
 
 
 class ApiTokenOut(BaseModel):
     id: int
     name: str
-    permission: str
-    created_at: str = ""
-    last_used_at: str | None = None
+    permission: Permission
+    created_at: UtcDatetime | None = None
+    last_used_at: UtcDatetime | None = None
 
 
 class ApiTokenCreated(ApiTokenOut):
     token: str
 
 
-class ShareRequest(BaseModel):
-    username: str = Field(..., min_length=1)
-    permission: str = Field(..., pattern="^(read|write)$")
+# ---------------------------------------------------------------- admin
+
+class UserCreate(Model):
+    username: Username
+    password: Password
 
 
-class SharePermissionUpdate(BaseModel):
-    permission: str = Field(..., pattern="^(read|write)$")
-
-
-class ShareOut(BaseModel):
-    id: int
-    name: str
-    permission: str
-    recipient: str = ""
-    owner: str = ""
-    category: str = ""
-    favorite: bool = False
-    created_at: str = ""
-
-
-class ShareInDetail(ShareOut):
-    source_credential_id: int | None = None
-
-
-class SharedCredentialFull(CredentialFull):
-    permission: str
-    owner: str = ""
-    share_id: int
-
-
-class ShareableUser(BaseModel):
+class UserOut(BaseModel):
     id: int
     username: str
+    is_admin: bool
+    vault_initialized: bool
+    mfa_enabled: bool
+    created_at: UtcDatetime | None = None
+
+
+class TempPassword(BaseModel):
+    username: str
+    temp_password: str
 
 
 class AuditLogOut(BaseModel):
@@ -133,4 +205,13 @@ class AuditLogOut(BaseModel):
     action: str
     detail: str = ""
     ip: str = ""
-    created_at: str = ""
+    created_at: UtcDatetime | None = None
+
+    @field_validator("username", "detail", "ip", mode="before")
+    @classmethod
+    def _none_to_empty(cls, v):
+        return v or ""
+
+
+class Ok(BaseModel):
+    ok: bool = True

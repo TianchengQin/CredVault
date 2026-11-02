@@ -1,99 +1,122 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
-from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, timezone
+
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from .database import Base
 
 
-class User(Base):
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class TimestampMixin:
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class User(TimestampMixin, Base):
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True, nullable=False)
-    login_hash = Column(String, nullable=False)
-    is_admin = Column(Integer, default=0)
-    # when set, the user must change their login password on next sign-in
-    must_change_password = Column(Integer, default=0)
-    # optional 2FA (TOTP)
-    totp_secret = Column(String, nullable=True)
-    totp_enabled = Column(Integer, default=0)
-    # vault metadata: each user has their own encrypted vault
-    vault_salt = Column(String, nullable=True)
-    vault_ciphertext = Column(Text, nullable=True)
-    vault_nonce = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    login_hash: Mapped[str] = mapped_column(String)
+    is_admin: Mapped[int] = mapped_column(Integer, default=0)
+    # set after an admin reset: the user must pick a new login password
+    must_change_password: Mapped[int] = mapped_column(Integer, default=0)
+    # bumped on password change/reset; embedded in JWTs to revoke old sessions
+    token_version: Mapped[int] = mapped_column(Integer, default=0)
 
-    credentials = relationship("Credential", back_populates="owner", cascade="all, delete-orphan")
-    api_tokens = relationship("ApiToken", back_populates="owner", cascade="all, delete-orphan")
+    # optional TOTP 2FA
+    totp_secret: Mapped[str | None] = mapped_column(String, nullable=True)
+    totp_enabled: Mapped[int] = mapped_column(Integer, default=0)
+    totp_last_counter: Mapped[int] = mapped_column(Integer, default=0)  # replay guard
+
+    # vault: key derived from the master password; the marker proves a candidate key
+    vault_salt: Mapped[str | None] = mapped_column(String, nullable=True)
+    vault_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    vault_nonce: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # X25519 keypair for receiving shares; the private key is wrapped by the vault key
+    public_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    private_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    private_key_nonce: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    credentials: Mapped[list["Credential"]] = relationship(back_populates="owner", cascade="all, delete-orphan")
+    api_tokens: Mapped[list["ApiToken"]] = relationship(back_populates="owner", cascade="all, delete-orphan")
+
+    @property
+    def vault_initialized(self) -> bool:
+        return self.vault_salt is not None
 
 
-class ApiToken(Base):
+class ApiToken(TimestampMixin, Base):
     __tablename__ = "api_tokens"
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    name = Column(String, nullable=False)
-    permission = Column(String, nullable=False)  # "read" | "write"
-    token_hash = Column(String, unique=True, index=True, nullable=False)
-    token_salt = Column(String, nullable=False)
-    # encrypted copy of the owner's vault key, decryptable with the token secret
-    key_enc = Column(Text, nullable=False)
-    nonce = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    last_used_at = Column(DateTime, nullable=True)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    permission: Mapped[str] = mapped_column(String(8))  # "read" | "write"
+    token_hash: Mapped[str] = mapped_column(String, unique=True, index=True)
+    token_salt: Mapped[str] = mapped_column(String)
+    # the owner's vault key, wrapped with a key derived from the token secret
+    key_enc: Mapped[str] = mapped_column(Text)
+    nonce: Mapped[str] = mapped_column(String)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    owner = relationship("User", back_populates="api_tokens")
+    owner: Mapped[User] = relationship(back_populates="api_tokens")
 
 
-class Credential(Base):
+class Credential(TimestampMixin, Base):
     __tablename__ = "credentials"
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    # name stored plaintext (it is shown in list), rest is encrypted
-    name = Column(String, nullable=False)
-    encrypted_payload = Column(Text, nullable=False)
-    nonce = Column(String, nullable=False)
-    category = Column(String, default="", index=True)
-    favorite = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))  # plaintext so lists can render without decrypting
+    encrypted_payload: Mapped[str] = mapped_column(Text)
+    nonce: Mapped[str] = mapped_column(String)
+    category: Mapped[str] = mapped_column(String(64), default="", index=True)
+    favorite: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
-    owner = relationship("User", back_populates="credentials")
+    owner: Mapped[User] = relationship(back_populates="credentials")
 
 
-class SharedCredential(Base):
-    """A copy of a credential shared to another user.
+class SharedCredential(TimestampMixin, Base):
+    """A snapshot of a credential shared with another user.
 
-    The copy is encrypted with the *recipient's* vault key, so only the
-    recipient can decrypt it. Permission controls read/write access.
+    The payload is sealed to the recipient's X25519 public key (``ephemeral_pub``
+    set), so it can be created without the recipient being online. Rows with no
+    ``ephemeral_pub`` are legacy shares encrypted directly with the recipient's
+    vault key; they are re-sealed the next time the recipient unlocks.
     """
+
     __tablename__ = "shared_credentials"
+    __table_args__ = (UniqueConstraint("source_credential_id", "recipient_user_id", name="uq_share_source_recipient"),)
 
-    id = Column(Integer, primary_key=True, index=True)
-    owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    recipient_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    # the owner's original credential this is a copy of (for reference/audit)
-    source_credential_id = Column(Integer, nullable=True)
-    permission = Column(String, nullable=False)  # "read" | "write"
-    name = Column(String, nullable=False)
-    encrypted_payload = Column(Text, nullable=False)
-    nonce = Column(String, nullable=False)
-    category = Column(String, default="", index=True)
-    favorite = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    recipient_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    source_credential_id: Mapped[int | None] = mapped_column(ForeignKey("credentials.id", ondelete="SET NULL"), nullable=True)
+    permission: Mapped[str] = mapped_column(String(8))
+    name: Mapped[str] = mapped_column(String(200))
+    encrypted_payload: Mapped[str] = mapped_column(Text)
+    nonce: Mapped[str] = mapped_column(String)
+    ephemeral_pub: Mapped[str | None] = mapped_column(String, nullable=True)
+    category: Mapped[str] = mapped_column(String(64), default="", index=True)
+    favorite: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
-    owner = relationship("User", foreign_keys=[owner_user_id])
-    recipient = relationship("User", foreign_keys=[recipient_user_id])
+    owner: Mapped[User] = relationship(foreign_keys=[owner_user_id])
+    recipient: Mapped[User] = relationship(foreign_keys=[recipient_user_id])
 
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    username = Column(String, nullable=True)
-    action = Column(String, nullable=False, index=True)
-    detail = Column(Text, default="")
-    ip = Column(String, default="")
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    detail: Mapped[str] = mapped_column(Text, default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

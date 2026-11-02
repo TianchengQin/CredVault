@@ -1,103 +1,86 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy.orm import Session
+"""Administration: user accounts and the audit trail. Admins never see vault contents."""
 
-from ..database import get_db
-from .. import schemas, auth, audit, crypto
-from ..models import User, AuditLog
+from typing import Annotated
 
-router = APIRouter(prefix="/api/users", tags=["users"])
+from fastapi import APIRouter, Query, Request
+from sqlalchemy import select
 
+from .. import audit, crypto, schemas
+from ..deps import DB, AdminUser
+from ..errors import BadRequest, NotFound
+from ..models import AuditLog, User
+from ..services import accounts
+from ..services import vault as vault_svc
+from ..vault_keys import vault_keys
 
-def _require_admin(user: User):
-    if not user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin privileges required")
-    return user
-
-
-@router.get("")
-def list_users(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db)):
-    _require_admin(user)
-    users = db.query(User).all()
-    return [{"id": u.id, "username": u.username, "is_admin": bool(u.is_admin),
-             "vault_initialized": u.vault_salt is not None,
-             "mfa_enabled": bool(u.totp_enabled)} for u in users]
+router = APIRouter(prefix="/api/users", tags=["admin"])
 
 
-@router.post("")
-def create_user(body: schemas.UserCreate, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db), request: Request = None):
-    _require_admin(user)
-    if db.query(User).filter(User.username == body.username).first():
-        raise HTTPException(status_code=400, detail="Username already exists")
-    new_user = User(
-        username=body.username,
-        login_hash=auth.hash_login_password(body.password),
-        is_admin=0,
+def _out(u: User) -> schemas.UserOut:
+    return schemas.UserOut(
+        id=u.id, username=u.username, is_admin=bool(u.is_admin),
+        vault_initialized=u.vault_initialized, mfa_enabled=bool(u.totp_enabled), created_at=u.created_at,
     )
-    db.add(new_user)
-    db.commit()
-    audit.log(db, user_id=user.id, username=user.username, action="user_create", detail=new_user.username, ip=audit.client_ip(request))
-    return {"id": new_user.id, "username": new_user.username, "is_admin": False, "vault_initialized": False}
 
 
-@router.delete("/{user_id}")
-def delete_user(user_id: int, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db), request: Request = None):
-    _require_admin(user)
-    target = db.query(User).filter(User.id == user_id).first()
-    if not target:
-        raise HTTPException(status_code=404, detail="User not found")
-    if target.id == user.id:
-        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+def _target(db, admin: User, user_id: int, action: str) -> User:
+    target = db.get(User, user_id)
+    if target is None:
+        raise NotFound("User not found")
+    if target.id == admin.id:
+        raise BadRequest(f"You can't {action} your own account here")
     if target.is_admin:
-        raise HTTPException(status_code=400, detail="Cannot delete an admin")
-    audit.log(db, user_id=user.id, username=user.username, action="user_delete", detail=target.username, ip=audit.client_ip(request))
-    db.delete(target)
-    db.commit()
-    return {"ok": True}
+        raise BadRequest(f"You can't {action} another administrator")
+    return target
 
 
-@router.post("/{user_id}/reset-vault")
-def reset_user_vault(user_id: int, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db), request: Request = None):
-    _require_admin(user)
-    target = db.query(User).filter(User.id == user_id).first()
-    if not target:
-        raise HTTPException(status_code=404, detail="User not found")
-    if target.id == user.id:
-        raise HTTPException(status_code=400, detail="Cannot reset your own vault here")
-    target.vault_salt = None
-    target.vault_ciphertext = None
-    target.vault_nonce = None
-    # remove their credentials and API tokens so the vault restarts clean
-    db.query(type(target).credentials.property.mapper.class_).filter_by(user_id=target.id).delete()
-    db.query(type(target).api_tokens.property.mapper.class_).filter_by(user_id=target.id).delete()
-    db.commit()
-    audit.log(db, user_id=user.id, username=user.username, action="vault_reset", detail=target.username, ip=audit.client_ip(request))
-    return {"ok": True}
+@router.get("", response_model=list[schemas.UserOut])
+def list_users(_: AdminUser, db: DB):
+    return [_out(u) for u in db.scalars(select(User).order_by(User.username))]
 
 
-@router.post("/{user_id}/reset-password")
-def reset_user_password(user_id: int, user: User = Depends(auth.get_current_user), db: Session = Depends(get_db), request: Request = None):
-    _require_admin(user)
-    target = db.query(User).filter(User.id == user_id).first()
-    if not target:
-        raise HTTPException(status_code=404, detail="User not found")
-    if target.id == user.id:
-        raise HTTPException(status_code=400, detail="Cannot reset your own password here")
-    temp = crypto.generate_password(14)
-    target.login_hash = auth.hash_login_password(temp)
-    target.must_change_password = 1
-    db.commit()
-    audit.log(db, user_id=user.id, username=user.username, action="password_reset", detail=target.username, ip=audit.client_ip(request))
-    return {"ok": True, "username": target.username, "temp_password": temp}
+@router.post("", response_model=schemas.UserOut, status_code=201)
+def create_user(body: schemas.UserCreate, admin: AdminUser, request: Request, db: DB):
+    user = accounts.create(db, body.username, body.password)
+    user.must_change_password = 1  # admin-chosen passwords are temporary
+    audit.record(db, "user_create", user=admin, detail=user.username, request=request)
+    return _out(user)
 
 
-@router.get("/audit-log")
-def audit_log(user: User = Depends(auth.get_current_user), db: Session = Depends(get_db), limit: int = 200):
-    _require_admin(user)
-    rows = db.query(AuditLog).order_by(AuditLog.id.desc()).limit(min(limit, 1000)).all()
-    return [
-        schemas.AuditLogOut(
-            id=r.id, username=r.username or "", action=r.action, detail=r.detail or "",
-            ip=r.ip or "", created_at=r.created_at.isoformat() if r.created_at else "",
-        )
-        for r in rows
-    ]
+@router.delete("/{user_id}", response_model=schemas.Ok)
+def delete_user(user_id: int, admin: AdminUser, request: Request, db: DB):
+    target = _target(db, admin, user_id, "delete")
+    name = target.username
+    accounts.delete_user(db, target)
+    audit.record(db, "user_delete", user=admin, detail=name, request=request)
+    return schemas.Ok()
+
+
+@router.post("/{user_id}/reset-vault", response_model=schemas.Ok)
+def reset_vault(user_id: int, admin: AdminUser, request: Request, db: DB):
+    target = _target(db, admin, user_id, "reset")
+    vault_svc.wipe(db, target)
+    vault_keys.revoke_user(target.id)
+    audit.record(db, "vault_reset", user=admin, detail=target.username, request=request)
+    return schemas.Ok()
+
+
+@router.post("/{user_id}/reset-password", response_model=schemas.TempPassword)
+def reset_password(user_id: int, admin: AdminUser, request: Request, db: DB):
+    target = _target(db, admin, user_id, "reset")
+    temp = crypto.generate_password(16)
+    accounts.set_password(target, temp, must_change=True)
+    audit.record(db, "password_reset", user=admin, detail=target.username, request=request)
+    return schemas.TempPassword(username=target.username, temp_password=temp)
+
+
+@router.get("/audit-log", response_model=list[schemas.AuditLogOut])
+def audit_log(
+    _: AdminUser, db: DB,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+    action: Annotated[str | None, Query(max_length=64)] = None,
+):
+    q = select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
+    if action:
+        q = q.where(AuditLog.action == action)
+    return list(db.scalars(q))
