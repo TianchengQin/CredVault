@@ -1,107 +1,118 @@
-import os
+import logging
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 
-from .database import Base, engine, SessionLocal
-from .models import User
-from . import auth
-from .routes import auth as auth_routes
-from .routes import vault as vault_routes
-from .routes import users as users_routes
-from .routes import tokens as tokens_routes
+from . import migrations
+from .config import INSECURE_ADMIN_PASSWORDS, settings
+from .database import Base, SessionLocal, engine
+from .routes import ROUTERS
+from .services import accounts
 
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "123sqwert")
+log = logging.getLogger("credvault")
 
-STATIC_DIR = Path(os.environ.get("STATIC_DIR", "/app/static"))
+CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; "
+    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+)
+SECURITY_HEADERS = {
+    "Content-Security-Policy": CSP,
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Strict-Transport-Security": "max-age=31536000",
+}
 
-# Refuse to run with a weak/default SECRET_KEY in production.
-_DEFAULT_KEYS = {"dev-secret-change-me", "change-me-to-a-long-random-string"}
-if os.environ.get("CREDVAULT_ALLOW_INSECURE", "").lower() not in {"1", "true", "yes"}:
-    if auth.SECRET_KEY in _DEFAULT_KEYS:
-        raise RuntimeError(
-            "SECRET_KEY is unset or set to the insecure default. "
-            "Set a long random SECRET_KEY (or CREDVAULT_ALLOW_INSECURE=1 for dev)."
-        )
 
-
-def _migrate():
-    """Idempotently add columns for upgrades on existing SQLite DBs."""
-    from sqlalchemy import text
-    statements = {
-        "users": [
-            ("totp_secret", "ALTER TABLE users ADD COLUMN totp_secret VARCHAR"),
-            ("totp_enabled", "ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0"),
-            ("must_change_password", "ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0"),
-        ],
-        "credentials": [
-            ("category", "ALTER TABLE credentials ADD COLUMN category VARCHAR DEFAULT ''"),
-            ("favorite", "ALTER TABLE credentials ADD COLUMN favorite INTEGER DEFAULT 0"),
-        ],
-    }
-    with engine.begin() as conn:
-        for table, cols in statements.items():
-            existing = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()}
-            for col, stmt in cols:
-                if col not in existing:
-                    try:
-                        conn.execute(text(stmt))
-                    except Exception:
-                        pass
+def _bootstrap_admin() -> None:
+    with SessionLocal() as db:
+        if accounts.find_by_username(db, settings.admin_username):
+            return
+        password = settings.admin_password
+        generated = (not password or password in INSECURE_ADMIN_PASSWORDS
+                     or len(password) < settings.min_login_password)
+        if generated:
+            password = secrets.token_urlsafe(18)
+            log.warning("ADMIN_PASSWORD unset, weak or a known default; generated a one-time password for %r: %s",
+                        settings.admin_username, password)
+        admin = accounts.create(db, settings.admin_username, password, is_admin=True)
+        admin.must_change_password = int(generated)
+        db.commit()
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_: FastAPI):
+    settings.validate()
     Base.metadata.create_all(bind=engine)
-    _migrate()
-    db = SessionLocal()
-    if not db.query(User).filter(User.username == ADMIN_USERNAME).first():
-        db.add(User(
-            username=ADMIN_USERNAME,
-            login_hash=auth.hash_login_password(ADMIN_PASSWORD),
-            is_admin=1,
-        ))
-        db.commit()
-    db.close()
+    migrations.upgrade(engine)
+    _bootstrap_admin()
     yield
 
 
-app = FastAPI(title="CredVault", lifespan=lifespan)
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="CredVault",
+        lifespan=lifespan,
+        docs_url="/docs" if settings.enable_docs else None,
+        redoc_url=None,
+        openapi_url="/openapi.json" if settings.enable_docs else None,
+    )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    if settings.cors_origins:  # only needed when the UI is served from another origin
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+            allow_headers=["Authorization", "Content-Type", "X-Vault-Token", "X-API-Token"],
+        )
 
-app.include_router(auth_routes.router)
-app.include_router(vault_routes.router)
-app.include_router(users_routes.router)
-app.include_router(tokens_routes.router)
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        for name, value in SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    for router in ROUTERS:
+        app.include_router(router)
+
+    @app.get("/api/health", include_in_schema=False)
+    def health():
+        return {"status": "ok"}
+
+    @app.api_route("/api/{_:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
+    def api_not_found(_: str):
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+
+    _mount_spa(app, settings.static_dir)
+    return app
 
 
-@app.get("/api/health")
-def health():
-    return {"status": "ok"}
+def _mount_spa(app: FastAPI, static_dir: Path) -> None:
+    if not (static_dir / "index.html").is_file():
+        return
+    root = static_dir.resolve()
+    index = root / "index.html"
+    if (root / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=root / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str):
+        candidate = (root / full_path).resolve()
+        # resolve() + containment check blocks ../ and encoded traversal
+        if full_path and candidate.is_relative_to(root) and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
 
-if STATIC_DIR.exists():
-    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
-
-    @app.get("/")
-    def index():
-        return FileResponse(STATIC_DIR / "index.html")
-
-    @app.get("/{full_path:path}")
-    def spa_fallback(full_path: str):
-        f = STATIC_DIR / full_path
-        if f.is_file():
-            return FileResponse(f)
-        return FileResponse(STATIC_DIR / "index.html")
+app = create_app()

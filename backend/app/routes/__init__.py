@@ -1,1 +1,3 @@
-from . import auth, vault, users, tokens  # noqa: F401
+from . import auth, backup, credentials, shares, tokens, users, vault
+
+ROUTERS = (auth.router, vault.router, credentials.router, shares.router, backup.router, tokens.router, users.router)

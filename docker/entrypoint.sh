@@ -1,52 +1,60 @@
 #!/bin/sh
-set -e
+set -eu
 
+DATA_DIR=${DATA_DIR:-/data}
 CERT_DIR=${CERT_DIR:-/certs}
 CERT_FILE=$CERT_DIR/server.crt
 KEY_FILE=$CERT_DIR/server.key
+APP_USER=credvault
 
+umask 077
+mkdir -p "$DATA_DIR" "$CERT_DIR"
+
+# ---- TLS: self-signed certificate on first boot (replace with your own in ./certs) ----
 if [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
   echo "Generating self-signed certificate..."
-  mkdir -p "$CERT_DIR"
-  openssl req -x509 -newkey rsa:2048 -nodes \
-    -keyout "$KEY_FILE" \
-    -out "$CERT_FILE" \
-    -days 3650 \
+  openssl req -x509 -newkey rsa:3072 -nodes -sha256 \
+    -keyout "$KEY_FILE" -out "$CERT_FILE" -days 825 \
     -subj "/CN=credvault.local" \
-    -addext "subjectAltName=DNS:localhost,IP:0.0.0.0,IP:127.0.0.1" \
+    -addext "subjectAltName=DNS:localhost,DNS:credvault.local,IP:127.0.0.1" \
     >/dev/null 2>&1
 fi
 
-# Ensure a strong, persistent SECRET_KEY (never the insecure defaults).
-DATA_DIR=${DATA_DIR:-/data}
-mkdir -p "$DATA_DIR"
-KEY_FILE_SECRET=$DATA_DIR/.secret_key
-INSECURE_KEYS="dev-secret-change-me change-me-to-a-long-random-string"
-if [ -z "$SECRET_KEY" ] || [ "$SECRET_KEY" = "dev-secret-change-me" ] || [ "$SECRET_KEY" = "change-me-to-a-long-random-string" ]; then
-  if [ -f "$KEY_FILE_SECRET" ]; then
-    SECRET_KEY=$(cat "$KEY_FILE_SECRET")
-  else
-    SECRET_KEY=$(openssl rand -hex 32)
-    umask 077
-    printf '%s' "$SECRET_KEY" > "$KEY_FILE_SECRET"
-  fi
-  export SECRET_KEY
-fi
+# ---- SECRET_KEY: strong and persistent, never a known default ----
+case "${SECRET_KEY:-}" in
+  ""|dev-secret-change-me|change-me-to-a-long-random-string)
+    if [ ! -s "$DATA_DIR/.secret_key" ]; then
+      openssl rand -hex 32 > "$DATA_DIR/.secret_key"
+    fi
+    SECRET_KEY=$(cat "$DATA_DIR/.secret_key")
+    export SECRET_KEY
+    ;;
+esac
 
-# Ensure a strong admin password (never ship the old insecure default).
-if [ -z "$ADMIN_PASSWORD" ] || [ "$ADMIN_PASSWORD" = "123sqwert" ]; then
-  if [ -f "$DATA_DIR/.admin_password" ]; then
+# ---- ADMIN_PASSWORD: only used to create the first admin ----
+case "${ADMIN_PASSWORD:-}" in
+  ""|123sqwert|change-me-to-a-strong-password)
+    if [ ! -s "$DATA_DIR/.admin_password" ]; then
+      openssl rand -base64 18 | tr -d '=+/\n' > "$DATA_DIR/.admin_password"
+      echo "Generated initial admin password -> stored in $DATA_DIR/.admin_password"
+      echo "Read it with: docker compose exec credvault cat $DATA_DIR/.admin_password"
+    fi
     ADMIN_PASSWORD=$(cat "$DATA_DIR/.admin_password")
-  else
-    ADMIN_PASSWORD=$(openssl rand -base64 12 | tr -d '=+/')
-    umask 077
-    printf '%s' "$ADMIN_PASSWORD" > "$DATA_DIR/.admin_password"
-  fi
-  export ADMIN_PASSWORD
-  echo "Generated admin password -> $ADMIN_PASSWORD  (also stored in $DATA_DIR/.admin_password)"
+    export ADMIN_PASSWORD
+    ;;
+esac
+
+# ---- drop privileges ----
+if [ "$(id -u)" = "0" ]; then
+  chown -R "$APP_USER:$APP_USER" "$DATA_DIR" "$CERT_DIR"
+  RUN_AS="setpriv --reuid=$APP_USER --regid=$APP_USER --init-groups"
+else
+  RUN_AS=""
 fi
 
 echo "Starting CredVault on https://0.0.0.0:8443"
-exec uvicorn app.main:app --host 0.0.0.0 --port 8443 \
-  --ssl-keyfile "$KEY_FILE" \
-  --ssl-certfile "$CERT_FILE"
+# shellcheck disable=SC2086
+exec $RUN_AS uvicorn app.main:app --host 0.0.0.0 --port 8443 \
+  --proxy-headers --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-127.0.0.1}" \
+  --ssl-keyfile "$KEY_FILE" --ssl-certfile "$CERT_FILE" \
+  --no-server-header

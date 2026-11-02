@@ -32,3 +32,8 @@ certs/
 
 # stale design snapshots (pre-redesign)
 design-shots/
+
+# python packaging
+build/
+*.egg-info/
+.pytest_cache/

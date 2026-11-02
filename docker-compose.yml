@@ -7,10 +7,17 @@ services:
       - "8904:8443"
     environment:
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      # If unset, the entrypoint generates a random admin password and prints it once.
+      # If unset, the entrypoint generates one and stores it in ./data/.admin_password
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # If unset, the entrypoint generates one and stores it in ./data/.secret_key
       - SECRET_KEY=${SECRET_KEY:-}
+      - ALLOW_REGISTRATION=${ALLOW_REGISTRATION:-true}
+      - VAULT_IDLE_MINUTES=${VAULT_IDLE_MINUTES:-15}
       - DATABASE_URL=sqlite:////data/credvault.db
     volumes:
       - ./data:/data
       - ./certs:/certs
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE, FOWNER]
